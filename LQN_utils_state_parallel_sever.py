@@ -23,109 +23,188 @@ import hashlib
 import itertools
 import networkx as nx
 
-# EPM bipartite graph 생성 함수
-def EPM_bipartite_graph_generator_old(num_system, num_ancilla, type): 
-    results = []  # 결과 저장 리스트
+def EPM_bipartite_graph_generator_igraph(num_system, num_ancilla):
+    """
+    igraph를 사용한 EPM 이분 그래프 생성기
+    
+    Parameters:
+    -----------
+    num_system : int
+        시스템 노드 수
+    num_ancilla : int
+        앵커라 노드 수
+    type : int
+        그래프 유형
+        
+    Yields:
+    -------
+    igraph.Graph
+        생성된 이분 그래프
+    """
+    import igraph as ig
+    import itertools
+    
     num_total = num_system + num_ancilla
-
+    
     # red-blue 조합 생성 (type=0 가정)
     red_blue_combinations, num_combi = list_all_combinations_with_duplication(num_system, num_ancilla)
-
+    
     # ancilla 조합 생성
-    ancilla_combinations_pre = generate_combinations(num_total)
-    ancilla_combinations = list(itertools.product(ancilla_combinations_pre, repeat=num_ancilla))
-
+    if num_ancilla > 0:
+        ancilla_combinations_pre = generate_combinations(num_total)
+        ancilla_combinations = list(itertools.product(ancilla_combinations_pre, repeat=num_ancilla))
+    
     for rb_comb in red_blue_combinations:
-        if num_ancilla != 0:
+        if num_ancilla > 0:
             for bl_comb in ancilla_combinations:
-                B = nx.Graph()
-                B.add_nodes_from(range(2 * num_total))
-                mapping = {}
-
+                # 노드 이름 생성
+                system_node_names = [f'S_{i}' for i in range(num_system)]
+                ancilla_node_names = [f'A_{i}' for i in range(num_ancilla)]
+                sculpting_node_names = [str(i) for i in range(num_total)]
+                
+                # 모든 노드 이름 리스트
+                all_node_names = system_node_names + ancilla_node_names + sculpting_node_names
+                
+                # igraph 그래프 생성
+                G = ig.Graph()
+                G.add_vertices(len(all_node_names))
+                
+                # 노드 이름 및 속성 설정
+                G.vs["name"] = all_node_names
+                
+                # 노드 카테고리 설정
+                categories = ["system_nodes"] * num_system + ["ancilla_nodes"] * num_ancilla + ["sculpting_nodes"] * num_total
+                G.vs["category"] = categories
+                
+                # 이분 그래프 타입 설정 (0: 왼쪽 파티션, 1: 오른쪽 파티션)
+                bipartite_types = [0] * (num_system + num_ancilla) + [1] * num_total
+                G.vs["bipartite"] = bipartite_types
+                
+                # 엣지 생성을 위한 리스트
+                edges = []
+                edge_weights = []
+                
                 # red-blue 엣지 추가
                 for rb_index, vt in enumerate(rb_comb):
-                    red = num_total + vt[0]
-                    blue = num_total + vt[1]
-
-                    B.add_edge(rb_index, red, weight=1.0)
-                    B.add_edge(rb_index, blue, weight=2.0)
-
-                    mapping[rb_index] = 'S_' + str(rb_index)
-                    mapping[num_total + rb_index] = rb_index
-
+                    red_idx = num_system + num_ancilla + vt[0]  # sculpting 노드 인덱스
+                    blue_idx = num_system + num_ancilla + vt[1]  # sculpting 노드 인덱스
+                    system_idx = rb_index  # system 노드 인덱스
+                    
+                    edges.append((system_idx, red_idx))
+                    edge_weights.append(1.0)
+                    
+                    edges.append((system_idx, blue_idx))
+                    edge_weights.append(2.0)
+                
                 # ancilla 엣지 추가
                 for anc_index, vt_list in enumerate(bl_comb):
+                    ancilla_idx = num_system + anc_index  # ancilla 노드 인덱스
                     for vt_inx in vt_list:
-                        B.add_edge(num_system + anc_index, num_total + vt_inx, weight=3) 
-
-                    mapping[num_system + anc_index] = 'A_' + str(anc_index)
-                    mapping[num_total + num_system + anc_index] = num_system + anc_index
-
-                # 노드 속성 추가
-                for node_index in range(2 * num_total):
-                    if node_index < num_system:
-                        B.nodes[node_index]['category'] = 'system_nodes'
-                        B.nodes[node_index]['bipartite'] = 0
-                    elif node_index < num_total:
-                        B.nodes[node_index]['category'] = 'ancilla_nodes'
-                        B.nodes[node_index]['bipartite'] = 0
-                    else:
-                        B.nodes[node_index]['category'] = 'sculpting_nodes'
-                        B.nodes[node_index]['bipartite'] = 1
-
-                B = nx.relabel_nodes(B, mapping)  # 노드 이름 변경
-
-                if all(len(list(B.neighbors(node))) >= 2 for node in B.nodes):
-                    results.append(B)
-        else:
-            B = nx.Graph()
-            B.add_nodes_from(range(2 * num_total))
-            mapping = {}
-
+                        sculpting_idx = num_system + num_ancilla + vt_inx  # sculpting 노드 인덱스
+                        edges.append((ancilla_idx, sculpting_idx))
+                        edge_weights.append(3.0)
+                
+                # 그래프에 엣지 추가
+                G.add_edges(edges)
+                G.es["weight"] = edge_weights
+                
+                # 각 노드가 최소 2개 이상의 이웃을 갖는지 확인
+                if all(G.degree(v) >= 2 for v in range(G.vcount())):
+                    yield G
+        else:  # num_ancilla == 0 인 경우
+            # 노드 이름 생성
+            system_node_names = [f'S_{i}' for i in range(num_system)]
+            sculpting_node_names = [str(i) for i in range(num_total)]
+            
+            # 모든 노드 이름 리스트
+            all_node_names = system_node_names + sculpting_node_names
+            
+            # igraph 그래프 생성
+            G = ig.Graph()
+            G.add_vertices(len(all_node_names))
+            
+            # 노드 이름 및 속성 설정
+            G.vs["name"] = all_node_names
+            
+            # 노드 카테고리 설정
+            categories = ["system_nodes"] * num_system + ["sculpting_nodes"] * num_total
+            G.vs["category"] = categories
+            
+            # 이분 그래프 타입 설정
+            bipartite_types = [0] * num_system + [1] * num_total
+            G.vs["bipartite"] = bipartite_types
+            
+            # 엣지 생성을 위한 리스트
+            edges = []
+            edge_weights = []
+            
+            # red-blue 엣지 추가
             for rb_index, vt in enumerate(rb_comb):
-                red = num_total + vt[0]
-                blue = num_total + vt[1]
+                red_idx = num_system + vt[0]  # sculpting 노드 인덱스
+                blue_idx = num_system + vt[1]  # sculpting 노드 인덱스
+                system_idx = rb_index  # system 노드 인덱스
+                
+                edges.append((system_idx, red_idx))
+                edge_weights.append(1.0)
+                
+                edges.append((system_idx, blue_idx))
+                edge_weights.append(2.0)
+            
+            # 그래프에 엣지 추가
+            G.add_edges(edges)
+            G.es["weight"] = edge_weights
+            
+            # 각 노드가 최소 2개 이상의 이웃을 갖는지 확인
+            if all(G.degree(v) >= 2 for v in range(G.vcount())):
+                yield G
 
-                B.add_edge(rb_index, red, weight=1.0)
-                B.add_edge(rb_index, blue, weight=2.0)
+# igraph와 NetworkX 그래프 간 변환 유틸리티 함수
+def igraph_to_networkx(g_igraph):
+    """igraph 그래프를 NetworkX 그래프로 변환"""
+    import networkx as nx
+    
+    G_nx = nx.Graph()
+    
+    # 노드 추가
+    for v in g_igraph.vs:
+        node_attrs = {attr: v[attr] for attr in v.attribute_names()}
+        G_nx.add_node(v["name"], **node_attrs)
+    
+    # 엣지 추가
+    for e in g_igraph.es:
+        source = g_igraph.vs[e.source]["name"]
+        target = g_igraph.vs[e.target]["name"]
+        edge_attrs = {attr: e[attr] for attr in e.attribute_names()}
+        G_nx.add_edge(source, target, **edge_attrs)
+    
+    return G_nx
 
-                mapping[rb_index] = 'S_' + str(rb_index)
-                mapping[num_total + rb_index] = rb_index
+def networkx_to_igraph(G_nx):
+    """NetworkX 그래프를 igraph 그래프로 변환"""
+    import igraph as ig
+    
+    g_igraph = ig.Graph()
+    
+    # 노드 추가
+    node_names = list(G_nx.nodes())
+    g_igraph.add_vertices(len(node_names))
+    g_igraph.vs["name"] = node_names
+    
+    # 노드 속성 추가
+    for attr in set().union(*(d.keys() for n, d in G_nx.nodes(data=True))):
+        if attr != "name":  # 이름은 이미 설정됨
+            g_igraph.vs[attr] = [G_nx.nodes[n].get(attr) for n in node_names]
+    
+    # 엣지 추가
+    edges = [(node_names.index(u), node_names.index(v)) for u, v in G_nx.edges()]
+    g_igraph.add_edges(edges)
+    
+    # 엣지 속성 추가
+    for attr in set().union(*(d.keys() for u, v, d in G_nx.edges(data=True))):
+        g_igraph.es[attr] = [G_nx.get_edge_data(u, v).get(attr) for u, v in G_nx.edges()]
+    
+    return g_igraph
 
-            for node_index in range(2 * num_total):
-                if node_index < num_system:
-                    B.nodes[node_index]['category'] = 'system_nodes'
-                    B.nodes[node_index]['bipartite'] = 0
-                elif node_index < num_total:
-                    B.nodes[node_index]['category'] = 'ancilla_nodes'
-                    B.nodes[node_index]['bipartite'] = 0
-                else:
-                    B.nodes[node_index]['category'] = 'sculpting_nodes'
-                    B.nodes[node_index]['bipartite'] = 1
-
-            B = nx.relabel_nodes(B, mapping)
-
-            if all(len(list(B.neighbors(node))) >= 2 for node in B.nodes):
-                results.append(B)
-
-    return results  # 최종 결과 반환 
-
-
-# NetworkX -> iGraph 변환
-def nx_to_igraph(nx_graph):
-    # 노드 매핑 (문자열 → 정수 변환)
-    node_map = {node: idx for idx, node in enumerate(nx_graph.nodes)}
-
-    # 엣지 추출
-    edges = []
-    for u, v in nx_graph.edges():
-        edges.append((node_map[u], node_map[v]))  # 정수 인덱스로 변환된 엣지 추가
-
-    # iGraph 객체 생성
-    ig_graph = ig.Graph()
-    ig_graph.add_vertices(len(node_map))  # 노드 추가
-    ig_graph.add_edges(edges)  # 엣지 추가
-    return ig_graph
 
 # Canonical Form 생성 (가중치를 고려하지 않음)
 def canonical_form_without_weights(ig_graph):
@@ -140,14 +219,13 @@ def generate_hash_from_canonical_form(canonical_form):
     canonical_str = str(canonical_form)
     return hashlib.sha256(canonical_str.encode('utf-8')).hexdigest()
 
+
 # 그래프 리스트 처리 및 그룹화
 def process_and_group_by_canonical_form(graph_list):
     canonical_groups = {}  # 해시 값을 키로, 그래프 그룹을 값으로 저장
     for graph in graph_list:
-        # NetworkX -> iGraph 변환
-        ig_graph = nx_to_igraph(graph)
         # Canonical Form 생성 (가중치 고려 안 함)
-        canonical_form = canonical_form_without_weights(ig_graph)
+        canonical_form = canonical_form_without_weights(graph)
         # Canonical Form의 해시 생성
         canonical_hash = generate_hash_from_canonical_form(canonical_form)
         # 동일 해시 값끼리 그룹화
@@ -156,184 +234,214 @@ def process_and_group_by_canonical_form(graph_list):
         canonical_groups[canonical_hash].append(graph)  # 그래프 추가
     return canonical_groups  # 그룹화된 결과 반환
 
-def get_adjacency_matrices(B):
-    # Separate nodes by categories
-    system_nodes = [node for node in B.nodes if B.nodes[node]['category'] == 'system_nodes']
-    ancilla_nodes = [node for node in B.nodes if B.nodes[node]['category'] == 'ancilla_nodes']
-    sculpting_nodes = [node for node in B.nodes if B.nodes[node]['category'] == 'sculpting_nodes']
-    
-    # Combine the nodes in the desired order
-    sorted_nodes = system_nodes + ancilla_nodes + sculpting_nodes
 
-    # Adjacency matrix (unweighted)
-    #adjacency_matrix = nx.to_numpy_array(B, nodelist=sorted_nodes)
-
-    # Weighted adjacency matrix
-    weighted_adj_matrix = nx.to_numpy_array(B, nodelist=sorted_nodes, weight='weight')
-
-    return weighted_adj_matrix\
-
-
-def Draw_EPM_bipartite_graph(B):
-    system_nodes = [node for node in list(B.nodes) if B.nodes[node]['category'] == 'system_nodes']
-    ancilla_nodes = [node for node in list(B.nodes) if B.nodes[node]['category'] == 'ancilla_nodes']
-    sculpting_nodes = [node for node in list(B.nodes) if B.nodes[node]['category'] == 'sculpting_nodes']
-    num_system = len(system_nodes)
-            
-    pos = {}
-    pos.update((node, (0, -index)) for index, node in enumerate(system_nodes))  # left nodes group 1
-    pos.update((node, (1, -index)) for index, node in enumerate(sculpting_nodes[:num_system]))  # right nodes group 1 aligned with system_nodes
-    pos.update((node, (0, -(index + len(system_nodes)))) for index, node in enumerate(ancilla_nodes))  # left nodes group 2
-    pos.update((node, (1, -(index + len(system_nodes)))) for index, node in enumerate(sculpting_nodes[num_system:]))  # right nodes group 2 aligned with ancilla_nodes
-    
-    # Draw the undirected bipartite graph
-    plt.figure(figsize=(6, 6))
-    
-    # Define node colors based on their category
-    colors_B = ['lightblue' if B.nodes[node]['category'] == 'system_nodes' else 
-                'lightcoral' if B.nodes[node]['category'] == 'ancilla_nodes' else 
-                'lightgreen' for node in B.nodes]
-    
-    # Map the weights to specific colors for visualization
-    edge_colors_B = ['red' if B[u][v]['weight'] == 1 else 
-                     'blue' if B[u][v]['weight'] == 2 else 
-                     'black' for u, v in B.edges]
-    
-    nx.draw(B, pos, with_labels=True, node_color=colors_B, edge_color=edge_colors_B, width=2)
-    plt.title("Undirected Bipartite Graph")
-    plt.show()
-
-
-import numpy as np
-import networkx as nx
-
-def EPM_digraph_from_EPM_bipartite_graph(B):
+def EPM_digraph_from_EPM_bipartite_graph_igraph(B):
     """
-    Convert an EPM bipartite graph (B) to a directed graph (D).
-
+    igraph 버전의 EPM 이분 그래프(B)를 방향 그래프(D)로 변환
+    
     Parameters:
-        B (nx.Graph): Input bipartite graph.
-
+    -----------
+    B : igraph.Graph
+        변환할 EPM 이분 그래프
+        
     Returns:
-        nx.DiGraph: Directed graph derived from the input bipartite graph.
+    --------
+    igraph.Graph
+        방향성 있는 EPM 그래프
     """
-    # Initialize directed graph
-    D = nx.DiGraph()
-
-    # Identify system and ancilla nodes
-    system_nodes = [node for node in B.nodes if B.nodes[node]['category'] == 'system_nodes']
-    ancilla_nodes = [node for node in B.nodes if B.nodes[node]['category'] == 'ancilla_nodes']
+    import igraph as ig
+    import numpy as np
+    
+    # 시스템 및 앵커라 노드 식별
+    system_nodes = [i for i, category in enumerate(B.vs["category"]) if category == "system_nodes"]
+    ancilla_nodes = [i for i, category in enumerate(B.vs["category"]) if category == "ancilla_nodes"]
+    
     num_system = len(system_nodes)
     num_ancilla = len(ancilla_nodes)
     num_total = num_system + num_ancilla
-
-    # Generate adjacency matrix and weight matrix from B
-    adj_weight_matrix_B = get_adjacency_matrices(B)
-
-    # Extract relevant submatrices for the directed graph
-    # adj_matrix_D = adj_matrix_B[:num_total, num_total:]
-    adj_weight_matrix_D = adj_weight_matrix_B[:num_total, num_total:]
-
-    # Add nodes to directed graph
-    D.add_nodes_from(range(num_total))
-
-    # Add directed edges with weights
-    for i in range(num_total):
-        for j in range(num_total):
-            if adj_weight_matrix_D[i, j] != 0:
-                D.add_edge(j, i, weight=adj_weight_matrix_D[i, j])  # Reverse direction
-
-    # Map node labels and categories
-    mapping = {}
+    
+    # 노드 순서 준비 (시스템 노드, 앵커라 노드, 스컬프팅 노드 순)
+    ordered_vertices = []
+    ordered_vertices.extend(system_nodes)
+    ordered_vertices.extend(ancilla_nodes)
+    ordered_vertices.extend([i for i, category in enumerate(B.vs["category"]) if category == "sculpting_nodes"])
+    
+    # 인접 행렬 계산
+    adj_matrix_B = np.array(B.get_adjacency(attribute="weight").data)
+    
+    # 재정렬된 인접 행렬 생성
+    reordered_adj_matrix = np.zeros_like(adj_matrix_B)
+    for i, v_i in enumerate(ordered_vertices):
+        for j, v_j in enumerate(ordered_vertices):
+            reordered_adj_matrix[i, j] = adj_matrix_B[v_i, v_j]
+    
+    # 방향 그래프용 관련 하위 행렬 추출
+    adj_matrix_D = reordered_adj_matrix[:num_total, num_total:]
+    
+    # 방향 그래프 초기화
+    D = ig.Graph(directed=True)
+    D.add_vertices(num_total)
+    
+    # 노드 속성 설정
+    categories = []
+    node_names = []
+    
     for i in range(num_total):
         if i < num_system:
-            mapping[i] = 'S_' + str(i)
-            D.nodes[i]['category'] = 'system_nodes'
+            categories.append("system_nodes")
+            node_names.append(f"S_{i}")
         else:
-            mapping[i] = 'A_' + str(i - num_system)
-            D.nodes[i]['category'] = 'ancilla_nodes'
-
-    # Relabel nodes
-    D = nx.relabel_nodes(D, mapping)
-
+            categories.append("ancilla_nodes")
+            node_names.append(f"A_{i-num_system}")
+    
+    D.vs["category"] = categories
+    D.vs["name"] = node_names
+    
+    # 방향성 있는 엣지 추가
+    edges = []
+    weights = []
+    
+    for i in range(num_total):
+        for j in range(num_total):
+            if adj_matrix_D[i, j] != 0:
+                # 방향은 j에서 i로 (원래 코드와 일치)
+                edges.append((j, i))
+                weights.append(adj_matrix_D[i, j])
+    
+    D.add_edges(edges)
+    D.es["weight"] = weights
+    
     return D
 
-def Draw_EPM_digraph(D):
+def is_single_scc_igraph(graph):
     """
-    Visualize an EPM directed graph (D).
-
+    그래프가 단일 강연결 컴포넌트(SCC)인지 확인합니다.
+    
     Parameters:
-        D (nx.DiGraph): Directed graph to visualize.
-    """
-    import matplotlib.pyplot as plt
-    import networkx as nx
-
-    # Identify system and ancilla nodes
-    system_nodes = [node for node in D.nodes if D.nodes[node]['category'] == 'system_nodes']
-    ancilla_nodes = [node for node in D.nodes if D.nodes[node]['category'] == 'ancilla_nodes']
-    
-    # Define positions for nodes
-    pos_D = {}
-    pos_D.update((node, (0, index)) for index, node in enumerate(system_nodes))  # System nodes on the left
-    pos_D.update((node, (1, index + len(system_nodes))) for index, node in enumerate(ancilla_nodes))  # Ancilla nodes on the right
-    
-    # Set the figure size
-    plt.figure(figsize=(12, 6))
-    
-    # Define node colors based on their category
-    colors_D = ['lightblue' if D.nodes[node]['category'] == 'system_nodes' else 'lightcoral' for node in D.nodes]
-    
-    # Map the edge weights to specific colors for visualization
-    edge_colors_D = ['red' if D[u][v]['weight'] == 1 else 
-                     'blue' if D[u][v]['weight'] == 2 else 
-                     'black' for u, v in D.edges]  # Use red for weight 1, blue for weight 2, black otherwise
-    
-    # Define curved edges
-    curved_edges = [edge for edge in D.edges]
-    arc_rad = 0.25  # Radius for edge curvature
-    
-    # Draw the graph
-    nx.draw(D, pos_D, with_labels=True, node_color=colors_D, edge_color=edge_colors_D, 
-            width=2, arrows=True, connectionstyle=f'arc3,rad={arc_rad}')
-    plt.title("Directed Graph with Curved Edges")
-    plt.show()
-
-
-def is_single_scc(graph):
-    """
-    Check if the graph is a single strongly connected component (SCC).
-
-    Parameters:
-        graph (nx.DiGraph): Directed graph.
-
+    -----------
+    graph : igraph.Graph
+        검사할 방향 그래프
+        
     Returns:
-        bool: True if the graph is a single SCC, False otherwise.
+    --------
+    bool
+        그래프가 단일 SCC이면 True, 아니면 False
     """
-    sccs = list(nx.strongly_connected_components(graph))
-    return len(sccs) == 1 and len(sccs[0]) == len(graph)
+    # igraph에서는 strongly_connected_components() 메서드로 SCC를 찾습니다
+    sccs = graph.connected_components(mode="strong")
+    
+    # 단일 SCC인지 확인: 컴포넌트가 1개이고 전체 노드를 포함해야 함
+    return len(sccs) == 1 and len(sccs[0]) == graph.vcount()
 
-def filter_groups_by_scc(grouped_graphs):
+
+def filter_groups_by_scc_igraph(grouped_graphs):
     """
-    Filter groups of graphs based on whether their first element's DiGraph is a single SCC.
-
+    SCC 조건을 만족하는 그래프 그룹만 필터링합니다 (igraph 버전).
+    그룹 구조(해시 키)를 유지합니다.
+    
     Parameters:
-        grouped_graphs (dict): Dictionary where each key represents a group identifier, and the value is a list of graphs.
-
+    -----------
+    grouped_graphs (dict): 
+        해시 키와 igraph 그래프 리스트를 포함하는 딕셔너리
+        
     Returns:
-        dict: Filtered dictionary containing only groups whose first graph is a single SCC.
+    --------
+    dict: 
+        SCC 조건을 만족하는 그래프 그룹만 포함하는 딕셔너리
     """
     filtered_groups = {}
-    for key, group in grouped_graphs.items():
-        if group:
-            # Convert the first graph in the group to a DiGraph
-            D = EPM_digraph_from_EPM_bipartite_graph(group[0])
-            # Check if it is a single SCC
-            if is_single_scc(D):
-                filtered_groups[key] = group
+    
+    for key, graph_list in grouped_graphs.items():
+        if len(graph_list) > 0:
+            try:
+                # 첫 번째 그래프로 SCC 확인
+                first_graph = graph_list[0] 
+                # 이분 그래프를 방향 그래프로 변환
+                D = EPM_digraph_from_EPM_bipartite_graph_igraph(first_graph)
+                
+                if is_single_scc_igraph(D):
+                    # SCC 조건을 만족하면 그룹 전체를 유지
+                    filtered_groups[key] = graph_list
+            except Exception as e:
+                print(f"Error processing graph with key {key}: {e}")
+                continue
+    
     return filtered_groups
 
+def extract_unique_bigraphs_with_weights_igraph(graph_list):
+    """
+    Extract unique bipartite graphs from a list, considering edge weights for isomorphism.
+    
+    Parameters:
+    graph_list (list of ig.Graph): A list of bipartite graphs to process.
+    
+    Returns:
+    list of ig.Graph: A list of unique bipartite graphs.
+    """
+    # List to store unique graphs
+    unique_graphs = []
+    
+    for new_graph in graph_list:
+        # Check if the new graph is isomorphic to any existing unique graph
+        is_unique = True
+        
+        for existing_graph in unique_graphs:
+            # 기본 검사: 노드 수와 엣지 수가 같은지 확인
+            if new_graph.vcount() != existing_graph.vcount() or new_graph.ecount() != existing_graph.ecount():
+                continue
+                
+            # 가중치 추출 (없으면 기본값 1 사용)
+            new_weights = new_graph.es.get_attribute_values("weight") if "weight" in new_graph.edge_attributes() else [1] * new_graph.ecount()
+            existing_weights = existing_graph.es.get_attribute_values("weight") if "weight" in existing_graph.edge_attributes() else [1] * existing_graph.ecount()
+            
+            # VF2 알고리즘으로 동형성 검사 - 가중치를 edge_color로 사용
+            if new_graph.isomorphic_vf2(existing_graph, 
+                                       edge_color1=new_weights,
+                                       edge_color2=existing_weights):
+                is_unique = False
+                break
+        
+        # 고유한 그래프만 추가
+        if is_unique:
+            unique_graphs.append(new_graph)
+    
+    return unique_graphs
 
-#아래가 원본임. 병렬처리한 부분으로 바꿔보는중. 
+def extract_unique_bigraphs_from_groups_igraph(grouped_graphs):
+    """
+    그래프 그룹 딕셔너리에서 각 그룹 내의 고유한 그래프를 추출합니다.
+    
+    Parameters:
+    -----------
+    grouped_graphs (dict):
+        해시 키를 키로, igraph 그래프 리스트를 값으로 가지는 딕셔너리
+    
+    Returns:
+    --------
+    dict:
+        해시 키를 키로, 고유한 igraph 그래프 리스트를 값으로 가지는 딕셔너리
+    """
+    result = {}
+    
+    for key, graph_list in grouped_graphs.items():
+        # 각 그래프가 igraph.Graph 인스턴스인지 확인
+        valid_graphs = [g for g in graph_list if isinstance(g, ig.Graph)]
+        
+        if len(valid_graphs) != len(graph_list):
+            print(f"경고: 키 {key}에 대해 {len(graph_list) - len(valid_graphs)}개의 유효하지 않은 그래프가 발견되었습니다.")
+        
+        # 각 그룹에 대해 고유한 그래프만 추출
+        if valid_graphs:
+            unique_graphs = extract_unique_bigraphs_with_weights_igraph(valid_graphs)
+            result[key] = unique_graphs
+        else:
+            result[key] = []
+    
+    return result
+
+
+##################################여기까지 새로운 함수 넣었음
+
 def list_all_combinations_with_duplication(num_system, num_ancilla):
     # Generate all possible ordered pairs (i, j) where i != j
     p = num_system+num_ancilla
@@ -345,7 +453,6 @@ def list_all_combinations_with_duplication(num_system, num_ancilla):
     
     return all_combinations, len(all_combinations)
 
-
 def generate_combinations(n):
     all_combinations = []
     elements = list(range(n))
@@ -354,104 +461,6 @@ def generate_combinations(n):
         all_combinations.extend(combinations)
     return all_combinations
 
-
-def EPM_di_graph_generator(result_of_the_bipartite_list):
-    save_result_digraph = []
-    for i in range(len(result_of_the_bipartite_list)):
-        save_result_digraph.append(EPM_digraph_from_EPM_bipartite_graph(
-            result_of_the_bipartite_list[i][0],
-            adj_matrix_B=result_of_the_bipartite_list[i][1],
-            adj_weight_matrix_B=result_of_the_bipartite_list[i][2]
-        ))
-    return save_result_digraph
-
-def graph_generation(num_system, num_ancilla, type):
-    bigraph_list_2 = []
-    digraph_list_2 = []
-
-    unique_bigraphs = set()  # Store unique bigraphs for isomorphism check
-
-    i = 0
-
-    for bigraph in EPM_bipartite_graph_generator(num_system, num_ancilla):
-        # Generate digraph from bipartite graph
-        #digraph = EPM_digraph_from_EPM_bipartite_graph(bigraph)
-        i += 1
-
-        # Define edge_match to consider edge weights
-        edge_match = lambda x, y: x.get("weight", 1) == y.get("weight", 1)
-
-        # Check uniqueness of the bipartite graph
-        is_unique = True
-        for existing_bigraph in unique_bigraphs:
-            if nx.is_isomorphic(bigraph, existing_bigraph, edge_match=edge_match):
-                is_unique = False
-                break
-
-        if is_unique:
-            unique_bigraphs.add(bigraph)  # Add unique bigraph
-            bigraph_list_2.append(bigraph) 
-            digraph = EPM_digraph_from_EPM_bipartite_graph(bigraph)
-            digraph_list_2.append(digraph)
-
-    return bigraph_list_2, digraph_list_2
-
-
-def count_dict_elements(d):
-    """
-    Count the total number of elements in a dictionary, including keys and values.
-
-    Parameters:
-        d (dict): Input dictionary.
-
-    Returns:
-        int: Total number of elements in the dictionary.
-    """
-    if not isinstance(d, dict):
-        raise ValueError("Input must be a dictionary.")
-    
-    total_elements = 0
-    
-    for key, value in d.items():
-        total_elements += 1  # Count the key
-        if isinstance(value, (list, dict)):  # Recursively count elements in lists or dictionaries
-            total_elements += count_dict_elements(value) if isinstance(value, dict) else len(value)
-        else:
-            total_elements += 1  # Count the value if not a container
-    
-    return total_elements
-
-def extract_unique_bigraphs_with_weights(graph_list):
-    """
-    Extract unique bipartite graphs from a list, considering edge weights for isomorphism.
-
-    Parameters:
-        graph_list (list of nx.Graph): A list of bipartite graphs to process.
-
-    Returns:
-        list of nx.Graph: A list of unique bipartite graphs.
-    """
-    # List to store unique graphs
-    unique_graphs = []
-
-    # Define edge_match to compare edge weights
-    edge_match = lambda x, y: x.get("weight", 1) == y.get("weight", 1)
-    
-    for new_graph in graph_list:
-        # Check if the new graph is isomorphic to any existing unique graph
-        is_unique = True
-        for existing_graph in unique_graphs:
-            if nx.is_isomorphic(new_graph, existing_graph, edge_match=edge_match):
-                is_unique = False
-                break
-
-        # If unique, add to the unique_graphs list
-        if is_unique:
-            unique_graphs.append(new_graph)
-
-    return unique_graphs
-
-##################################여기까지 새로운 함수 넣었음
 
 def is_perfect_matching(G, matching):
     # 완전 매칭은 모든 노드를 커버합니다 (이분 그래프의 경우 전체 노드의 절반)
