@@ -4,7 +4,7 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import random
 import numpy as np
-from LQN_igraph import *
+from parallel.LQN_igraph import *
 import itertools
 from copy import deepcopy
 
