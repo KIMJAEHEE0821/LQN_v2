@@ -1,12 +1,13 @@
 import argparse
-import time
 import pickle
-import multiprocessing
+import networkx as nx
+import matplotlib.pyplot as plt
+import random
+import numpy as np
+from LQN_igraph import *
+import itertools
+from copy import deepcopy
 
-# Import functions from the module
-from epm_parallel_functions import epm_process_parallel
-# Import original functions
-from epm_functions import EPM_bipartite_graph_generator_igraph  # Assuming original functions are in this module
 
 def main(num_system, num_ancilla, n_workers=None, type="default"):
     """
