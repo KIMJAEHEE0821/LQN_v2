@@ -1,25 +1,22 @@
 import networkx as nx
 import matplotlib.pyplot as plt
 import random
-from itertools import combinations, permutations
 import itertools
+from itertools import combinations, permutations, groupby
 import numpy as np
 import pickle
 from copy import deepcopy
 import sympy as sp
-from itertools import groupby
 from collections import Counter, defaultdict
-from functools import reduce
+from functools import reduce, partial
 from math import gcd
 from sympy.physics.quantum import Ket
 from sympy import Add
-
-
-import networkx as nx
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 import igraph as ig
-import itertools
 import hashlib
-
+import argparse
 import itertools
 import networkx as nx
 
@@ -219,20 +216,316 @@ def generate_hash_from_canonical_form(canonical_form):
     canonical_str = str(canonical_form)
     return hashlib.sha256(canonical_str.encode('utf-8')).hexdigest()
 
+################################################
 
-# 그래프 리스트 처리 및 그룹화
-def process_and_group_by_canonical_form(graph_list):
-    canonical_groups = {}  # 해시 값을 키로, 그래프 그룹을 값으로 저장
-    for graph in graph_list:
-        # Canonical Form 생성 (가중치 고려 안 함)
+
+# Graph batch processing function for parallel execution
+def process_graph_batch(graph_batch):
+    """
+    Process a batch of graphs
+    
+    Parameters:
+    -----------
+    graph_batch : list
+        List of graphs to process
+        
+    Returns:
+    --------
+    dict
+        Dictionary with canonical hashes as keys and graph lists as values
+    """
+    batch_groups = {}
+    for graph in graph_batch:
         canonical_form = canonical_form_without_weights(graph)
-        # Canonical Form의 해시 생성
         canonical_hash = generate_hash_from_canonical_form(canonical_form)
-        # 동일 해시 값끼리 그룹화
-        if canonical_hash not in canonical_groups:
-            canonical_groups[canonical_hash] = []  # 새로운 그룹 생성
-        canonical_groups[canonical_hash].append(graph)  # 그래프 추가
-    return canonical_groups  # 그룹화된 결과 반환
+        if canonical_hash not in batch_groups:
+            batch_groups[canonical_hash] = []
+        batch_groups[canonical_hash].append(graph)
+    return batch_groups
+
+# Parallelized graph processing and grouping function
+def process_and_group_by_canonical_form_parallel(graph_generator, n_workers=None):
+    """
+    Process and group graphs by canonical form in parallel
+    
+    Parameters:
+    -----------
+    graph_generator : generator
+        Graph generator
+    n_workers : int, optional
+        Number of worker processes to use
+        
+    Returns:
+    --------
+    dict
+        Dictionary with canonical hashes as keys and graph lists as values
+    """
+    if n_workers is None:
+        n_workers = multiprocessing.cpu_count()
+    
+    # Load graphs from generator (memory considerations needed)
+    print("Loading graphs...")
+    graphs = list(graph_generator)
+    print(f"Loading complete: {len(graphs)} graphs")
+    
+    # Split graphs into batches
+    batch_size = max(1, len(graphs) // n_workers)
+    batches = [graphs[i:i+batch_size] for i in range(0, len(graphs), batch_size)]
+    print(f"Split into {len(batches)} batches, approximately {batch_size} graphs per batch")
+    
+    # Execute parallel processing
+    canonical_groups = {}
+    print("Starting parallel processing...")
+    
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        batch_results = list(executor.map(process_graph_batch, batches))
+    
+    print("Parallel processing complete, merging results...")
+    
+    # Merge results
+    for batch_result in batch_results:
+        for canonical_hash, graphs in batch_result.items():
+            if canonical_hash not in canonical_groups:
+                canonical_groups[canonical_hash] = []
+            canonical_groups[canonical_hash].extend(graphs)
+    
+    print(f"Merge complete: {len(canonical_groups)} unique groups")
+    return canonical_groups
+
+
+# Filter single group by SCC condition (for parallel processing)
+def filter_group_by_scc(group_item):
+    """
+    Check SCC condition for a single group
+    
+    Parameters:
+    -----------
+    group_item : tuple
+        Tuple of (canonical_hash, graph_list)
+        
+    Returns:
+    --------
+    tuple
+        Tuple of (canonical_hash, filtered_graph_list)
+    """
+    canonical_hash, graph_list = group_item
+    
+    if not graph_list:
+        return (canonical_hash, [])
+    
+    try:
+        # Check SCC using the first graph
+        first_graph = graph_list[0] 
+        # Convert bipartite graph to directed graph
+        D = EPM_digraph_from_EPM_bipartite_graph_igraph(first_graph)
+        
+        if is_single_scc_igraph(D):
+            # If satisfies SCC condition, return the entire group
+            return (canonical_hash, graph_list)
+        else:
+            # If not, return empty list
+            return (canonical_hash, [])
+    except Exception as e:
+        print(f"Error occurred (key: {canonical_hash}): {e}")
+        return (canonical_hash, [])
+
+# Parallelized SCC filtering function
+def filter_groups_by_scc_igraph_parallel(grouped_graphs, n_workers=None):
+    """
+    Filter graph groups by SCC condition in parallel
+    
+    Parameters:
+    -----------
+    grouped_graphs : dict
+        Dictionary with hash keys and graph lists as values
+    n_workers : int, optional
+        Number of worker processes to use
+        
+    Returns:
+    --------
+    dict
+        Dictionary containing only groups that satisfy SCC condition
+    """
+    if n_workers is None:
+        n_workers = multiprocessing.cpu_count()
+    
+    print(f"Starting SCC filtering: {len(grouped_graphs)} groups")
+    
+    # Create list of group items
+    group_items = list(grouped_graphs.items())
+    
+    # Execute parallel processing
+    filtered_items = []
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        filtered_items = list(executor.map(filter_group_by_scc, group_items))
+    
+    # Construct result dictionary
+    filtered_groups = {}
+    for canonical_hash, graph_list in filtered_items:
+        if graph_list:  # Only add non-empty lists
+            filtered_groups[canonical_hash] = graph_list
+    
+    print(f"SCC filtering complete: {len(filtered_groups)} groups satisfy the condition")
+    return filtered_groups
+
+def extract_unique_bigraphs_with_weights_igraph(graph_list):
+    """
+    Extract unique bipartite graphs from a list, considering edge weights for isomorphism.
+    
+    Parameters:
+    graph_list (list of ig.Graph): A list of bipartite graphs to process.
+    
+    Returns:
+    list of ig.Graph: A list of unique bipartite graphs.
+    """
+    # List to store unique graphs
+    unique_graphs = []
+    
+    for new_graph in graph_list:
+        # Check if the new graph is isomorphic to any existing unique graph
+        is_unique = True
+        
+        for existing_graph in unique_graphs:
+            # 기본 검사: 노드 수와 엣지 수가 같은지 확인
+            if new_graph.vcount() != existing_graph.vcount() or new_graph.ecount() != existing_graph.ecount():
+                continue
+                
+            # 가중치 추출 (없으면 기본값 1 사용)
+            new_weights = new_graph.es.get_attribute_values("weight") if "weight" in new_graph.edge_attributes() else [1] * new_graph.ecount()
+            existing_weights = existing_graph.es.get_attribute_values("weight") if "weight" in existing_graph.edge_attributes() else [1] * existing_graph.ecount()
+            
+            # VF2 알고리즘으로 동형성 검사 - 가중치를 edge_color로 사용
+            if new_graph.isomorphic_vf2(existing_graph, 
+                                       edge_color1=new_weights,
+                                       edge_color2=existing_weights):
+                is_unique = False
+                break
+        
+        # 고유한 그래프만 추가
+        if is_unique:
+            unique_graphs.append(new_graph)
+    
+    return unique_graphs
+
+# Extract unique graphs from a single group (for parallel processing)
+def extract_unique_from_group(group_item):
+    """
+    Extract unique graphs from a single group
+    
+    Parameters:
+    -----------
+    group_item : tuple
+        Tuple of (canonical_hash, graph_list)
+        
+    Returns:
+    --------
+    tuple
+        Tuple of (canonical_hash, unique_graph_list)
+    """
+    canonical_hash, graph_list = group_item
+    
+    if not graph_list:
+        return (canonical_hash, [])
+    
+    try:
+        # Filter only igraph.Graph instances
+        valid_graphs = [g for g in graph_list if isinstance(g, ig.Graph)]
+        
+        if len(valid_graphs) != len(graph_list):
+            print(f"Warning: {len(graph_list) - len(valid_graphs)} invalid graphs found for key {canonical_hash}")
+        
+        if valid_graphs:
+            unique_graphs = extract_unique_bigraphs_with_weights_igraph(valid_graphs)
+            return (canonical_hash, unique_graphs)
+        else:
+            return (canonical_hash, [])
+    except Exception as e:
+        print(f"Error while extracting unique graphs (key: {canonical_hash}): {e}")
+        return (canonical_hash, [])
+
+# Parallelized function to extract unique bipartite graphs
+def extract_unique_bigraphs_from_groups_igraph_parallel(grouped_graphs, n_workers=None):
+    """
+    Extract unique graphs from groups in parallel
+    
+    Parameters:
+    -----------
+    grouped_graphs : dict
+        Dictionary with hash keys and graph lists as values
+    n_workers : int, optional
+        Number of worker processes to use
+        
+    Returns:
+    --------
+    dict
+        Dictionary with hash keys and unique graph lists as values
+    """
+    if n_workers is None:
+        n_workers = multiprocessing.cpu_count()
+    
+    print(f"Starting unique graph extraction: {len(grouped_graphs)} groups")
+    
+    # Create list of group items
+    group_items = list(grouped_graphs.items())
+    
+    # Execute parallel processing
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        unique_items = list(executor.map(extract_unique_from_group, group_items))
+    
+    # Construct result dictionary
+    result = {}
+    for canonical_hash, unique_graphs in unique_items:
+        if unique_graphs:  # Only add non-empty lists
+            result[canonical_hash] = unique_graphs
+    
+    print(f"Unique graph extraction complete: unique graphs extracted from {len(result)} groups")
+    return result
+
+# Parallelized EPM process function
+def epm_process_parallel(num_system, num_ancilla, n_workers=None):
+    """
+    Parallelized EPM processing function
+    
+    Parameters:
+    -----------
+    num_system : int
+        Number of system nodes
+    num_ancilla : int
+        Number of ancilla nodes
+    n_workers : int, optional
+        Number of worker processes to use
+        
+    Returns:
+    --------
+    dict
+        Dictionary containing final unique bipartite graphs
+    """
+    if n_workers is None:
+        n_workers = multiprocessing.cpu_count()
+    
+    print(f"Starting parallel EPM process (system: {num_system}, ancilla: {num_ancilla}, workers: {n_workers})")
+    
+    # 1. Graph generation (not parallelized)
+    print("Initializing graph generator...")
+    graph_generator = EPM_bipartite_graph_generator_igraph(num_system, num_ancilla)
+    
+    # 2. Process and group by canonical form (parallel)
+    print("Processing and grouping graphs by canonical form...")
+    canonical_groups = process_and_group_by_canonical_form_parallel(graph_generator, n_workers)
+    
+    # 3. Filter groups by SCC condition (parallel)
+    print("Filtering groups by SCC condition...")
+    filtered_groups = filter_groups_by_scc_igraph_parallel(canonical_groups, n_workers)
+    
+    # 4. Extract unique bipartite graphs (parallel)
+    print("Extracting unique bipartite graphs...")
+    unique_bigraph = extract_unique_bigraphs_from_groups_igraph_parallel(filtered_groups, n_workers)
+    
+    print("EPM process complete")
+    return unique_bigraph
+
+
+################################################
 
 
 def EPM_digraph_from_EPM_bipartite_graph_igraph(B):
@@ -332,120 +625,7 @@ def is_single_scc_igraph(graph):
     
     # 단일 SCC인지 확인: 컴포넌트가 1개이고 전체 노드를 포함해야 함
     return len(sccs) == 1 and len(sccs[0]) == graph.vcount()
-
-
-def filter_groups_by_scc_igraph(grouped_graphs):
-    """
-    SCC 조건을 만족하는 그래프 그룹만 필터링합니다 (igraph 버전).
-    그룹 구조(해시 키)를 유지합니다.
     
-    Parameters:
-    -----------
-    grouped_graphs (dict): 
-        해시 키와 igraph 그래프 리스트를 포함하는 딕셔너리
-        
-    Returns:
-    --------
-    dict: 
-        SCC 조건을 만족하는 그래프 그룹만 포함하는 딕셔너리
-    """
-    filtered_groups = {}
-    
-    for key, graph_list in grouped_graphs.items():
-        if len(graph_list) > 0:
-            try:
-                # 첫 번째 그래프로 SCC 확인
-                first_graph = graph_list[0] 
-                # 이분 그래프를 방향 그래프로 변환
-                D = EPM_digraph_from_EPM_bipartite_graph_igraph(first_graph)
-                
-                if is_single_scc_igraph(D):
-                    # SCC 조건을 만족하면 그룹 전체를 유지
-                    filtered_groups[key] = graph_list
-            except Exception as e:
-                print(f"Error processing graph with key {key}: {e}")
-                continue
-    
-    return filtered_groups
-
-def extract_unique_bigraphs_with_weights_igraph(graph_list):
-    """
-    Extract unique bipartite graphs from a list, considering edge weights for isomorphism.
-    
-    Parameters:
-    graph_list (list of ig.Graph): A list of bipartite graphs to process.
-    
-    Returns:
-    list of ig.Graph: A list of unique bipartite graphs.
-    """
-    # List to store unique graphs
-    unique_graphs = []
-    
-    for new_graph in graph_list:
-        # Check if the new graph is isomorphic to any existing unique graph
-        is_unique = True
-        
-        for existing_graph in unique_graphs:
-            # 기본 검사: 노드 수와 엣지 수가 같은지 확인
-            if new_graph.vcount() != existing_graph.vcount() or new_graph.ecount() != existing_graph.ecount():
-                continue
-                
-            # 가중치 추출 (없으면 기본값 1 사용)
-            new_weights = new_graph.es.get_attribute_values("weight") if "weight" in new_graph.edge_attributes() else [1] * new_graph.ecount()
-            existing_weights = existing_graph.es.get_attribute_values("weight") if "weight" in existing_graph.edge_attributes() else [1] * existing_graph.ecount()
-            
-            # VF2 알고리즘으로 동형성 검사 - 가중치를 edge_color로 사용
-            if new_graph.isomorphic_vf2(existing_graph, 
-                                       edge_color1=new_weights,
-                                       edge_color2=existing_weights):
-                is_unique = False
-                break
-        
-        # 고유한 그래프만 추가
-        if is_unique:
-            unique_graphs.append(new_graph)
-    
-    return unique_graphs
-
-def extract_unique_bigraphs_from_groups_igraph(grouped_graphs):
-    """
-    그래프 그룹 딕셔너리에서 각 그룹 내의 고유한 그래프를 추출합니다.
-    
-    Parameters:
-    -----------
-    grouped_graphs (dict):
-        해시 키를 키로, igraph 그래프 리스트를 값으로 가지는 딕셔너리
-    
-    Returns:
-    --------
-    dict:
-        해시 키를 키로, 고유한 igraph 그래프 리스트를 값으로 가지는 딕셔너리
-    """
-    result = {}
-    
-    for key, graph_list in grouped_graphs.items():
-        # 각 그래프가 igraph.Graph 인스턴스인지 확인
-        valid_graphs = [g for g in graph_list if isinstance(g, ig.Graph)]
-        
-        if len(valid_graphs) != len(graph_list):
-            print(f"경고: 키 {key}에 대해 {len(graph_list) - len(valid_graphs)}개의 유효하지 않은 그래프가 발견되었습니다.")
-        
-        # 각 그룹에 대해 고유한 그래프만 추출
-        if valid_graphs:
-            unique_graphs = extract_unique_bigraphs_with_weights_igraph(valid_graphs)
-            result[key] = unique_graphs
-        else:
-            result[key] = []
-    
-    return result
-
-def epm_process(num_system, num_ancilla):
-    graph_generator = EPM_bipartite_graph_generator_igraph(num_system, num_ancilla)
-    canonical_groups = process_and_group_by_canonical_form(graph_generator)
-    filtered_groups = filter_groups_by_scc_igraph(canonical_groups)
-    unique_bigraph = extract_unique_bigraphs_from_groups_igraph(filtered_groups)
-    return unique_bigraph
-
 ##################################여기까지 새로운 함수 넣었음
 
 def list_all_combinations_with_duplication(num_system, num_ancilla):

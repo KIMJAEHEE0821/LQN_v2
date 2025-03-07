@@ -211,7 +211,12 @@ def canonical_form_without_weights(ig_graph):
     # iGraph의 canonical_permutation을 사용하여 가중치 없이 처리
     perm = ig_graph.canonical_permutation()  # 색상(color) 정보 없이 permutation 생성
     permuted = ig_graph.permute_vertices(perm)  # 정렬 적용
-    return tuple(map(tuple, permuted.get_adjacency().data))  # Immutable 변환
+
+    #병렬화를 위한 추가항
+    perm = ig_graph.canonical_permutation()
+    permuted = ig_graph.permute_vertices(perm)
+    return tuple(map(tuple, permuted.get_adjacency().data))
+
 
 # Canonical Form의 해시 생성
 def generate_hash_from_canonical_form(canonical_form):
