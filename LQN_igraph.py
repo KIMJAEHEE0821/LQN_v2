@@ -439,6 +439,12 @@ def extract_unique_bigraphs_from_groups_igraph(grouped_graphs):
     
     return result
 
+def epm_process(num_system, num_ancilla):
+    graph_generator = EPM_bipartite_graph_generator_igraph(num_system, num_ancilla)
+    canonical_groups = process_and_group_by_canonical_form(graph_generator)
+    filtered_groups = filter_groups_by_scc_igraph(canonical_groups)
+    unique_bigraph = extract_unique_bigraphs_from_groups_igraph(filtered_groups)
+    return unique_bigraph
 
 ##################################여기까지 새로운 함수 넣었음
 
