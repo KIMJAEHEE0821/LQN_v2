@@ -451,7 +451,112 @@ def epm_process(num_system, num_ancilla):
     unique_bigraph = extract_unique_bigraphs_from_groups_igraph(filtered_groups)
     return unique_bigraph
 
-##################################여기까지 새로운 함수 넣었음
+##################################Draw함수
+
+# igraph와 NetworkX 그래프 간 변환 유틸리티 함수
+def igraph_to_networkx(g_igraph):
+    """igraph 그래프를 NetworkX 그래프로 변환"""
+    import networkx as nx
+    
+    G_nx = nx.Graph()
+    
+    # 노드 추가
+    for v in g_igraph.vs:
+        node_attrs = {attr: v[attr] for attr in v.attribute_names()}
+        G_nx.add_node(v["name"], **node_attrs)
+    
+    # 엣지 추가
+    for e in g_igraph.es:
+        source = g_igraph.vs[e.source]["name"]
+        target = g_igraph.vs[e.target]["name"]
+        edge_attrs = {attr: e[attr] for attr in e.attribute_names()}
+        G_nx.add_edge(source, target, **edge_attrs)
+    
+    return G_nx
+
+def networkx_to_igraph(G_nx):
+    """NetworkX 그래프를 igraph 그래프로 변환"""
+    import igraph as ig
+    
+    g_igraph = ig.Graph()
+    
+    # 노드 추가
+    node_names = list(G_nx.nodes())
+    g_igraph.add_vertices(len(node_names))
+    g_igraph.vs["name"] = node_names
+    
+    # 노드 속성 추가
+    for attr in set().union(*(d.keys() for n, d in G_nx.nodes(data=True))):
+        if attr != "name":  # 이름은 이미 설정됨
+            g_igraph.vs[attr] = [G_nx.nodes[n].get(attr) for n in node_names]
+    
+    # 엣지 추가
+    edges = [(node_names.index(u), node_names.index(v)) for u, v in G_nx.edges()]
+    g_igraph.add_edges(edges)
+    
+    # 엣지 속성 추가
+    for attr in set().union(*(d.keys() for u, v, d in G_nx.edges(data=True))):
+        g_igraph.es[attr] = [G_nx.get_edge_data(u, v).get(attr) for u, v in G_nx.edges()]
+    
+    return g_igraph
+
+def Draw_EPM_bipartite_graph(B):
+    system_nodes = [node for node in list(B.nodes) if B.nodes[node]['category'] == 'system_nodes']
+    ancilla_nodes = [node for node in list(B.nodes) if B.nodes[node]['category'] == 'ancilla_nodes']
+    sculpting_nodes = [node for node in list(B.nodes) if B.nodes[node]['category'] == 'sculpting_nodes']
+    num_system = len(system_nodes)
+            
+    pos = {}
+    pos.update((node, (0, -index)) for index, node in enumerate(system_nodes))  # left nodes group 1
+    pos.update((node, (1, -index)) for index, node in enumerate(sculpting_nodes[:num_system]))  # right nodes group 1 aligned with system_nodes
+    pos.update((node, (0, -(index + len(system_nodes)))) for index, node in enumerate(ancilla_nodes))  # left nodes group 2
+    pos.update((node, (1, -(index + len(system_nodes)))) for index, node in enumerate(sculpting_nodes[num_system:]))  # right nodes group 2 aligned with ancilla_nodes
+    
+    # Draw the undirected bipartite graph
+    plt.figure(figsize=(6, 6))
+    
+    # Define node colors based on their category
+    colors_B = ['lightblue' if B.nodes[node]['category'] == 'system_nodes' else 
+                'lightcoral' if B.nodes[node]['category'] == 'ancilla_nodes' else 
+                'lightgreen' for node in B.nodes]
+    
+    # Map the weights to specific colors for visualization
+    edge_colors_B = ['red' if B[u][v]['weight'] == 1.0 else 
+                     'blue' if B[u][v]['weight'] == 2.0 else 
+                     'black' for u, v in B.edges]
+    
+    nx.draw(B, pos, with_labels=True, node_color=colors_B, edge_color=edge_colors_B, width=2)
+    plt.title("Undirected Bipartite Graph")
+    plt.show()
+
+
+def Draw_EPM_digraph(D):
+    system_nodes = [node for node in D.nodes if D.nodes[node]['category'] == 'system_nodes']
+    ancilla_nodes = [node for node in D.nodes if D.nodes[node]['category'] == 'ancilla_nodes']
+    
+    pos_D = {}
+    pos_D.update((node, (0, index)) for index, node in enumerate(system_nodes))
+    pos_D.update((node, (1, index + len(system_nodes))) for index, node in enumerate(ancilla_nodes))
+    
+    # Draw the directed graph with curved edges
+    plt.figure(figsize=(12, 6))
+    
+    # Define node colors based on their category
+    colors_D = ['lightblue' if D.nodes[node]['category'] == 'system_nodes' else 'lightcoral' for node in D.nodes]
+    
+    # Map the weights to specific colors for visualization
+    edge_colors_D = ['red' if D[u][v]['weight'] == '0' else 
+                     'blue' if D[u][v]['weight'] == '1' else 
+                     'black' for u, v in D.edges]
+    
+    # Create curved edges
+    curved_edges = [edge for edge in D.edges]
+    arc_rad = 0.25
+    
+    nx.draw(D, pos_D, with_labels=True, node_color=colors_D, edge_color=edge_colors_D, width=2, arrows=True, connectionstyle=f'arc3,rad={arc_rad}')
+    plt.title("Directed Graph with Curved Edges")
+    plt.show()
+########################################################
 
 def list_all_combinations_with_duplication(num_system, num_ancilla):
     # Generate all possible ordered pairs (i, j) where i != j

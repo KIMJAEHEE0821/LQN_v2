@@ -49,7 +49,7 @@ MONITOR_PID=$!
 # Execute EPM process
 # The --n_workers parameter is matched to the number of CPUs allocated by SLURM
 echo "Executing EPM process..."
-python parallel_epm_process.py --num_system $VAR1 --num_ancilla $VAR2 --n_workers $SLURM_CPUS_PER_TASK --type "default"
+python LQN_all_case_parallel.py --num_system $VAR1 --num_ancilla $VAR2 --n_workers $SLURM_CPUS_PER_TASK --type "default"
 
 # Terminate memory monitoring
 kill $MONITOR_PID
