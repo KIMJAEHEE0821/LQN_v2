@@ -130,12 +130,52 @@ def EPM_digraph_from_EPM_bipartite_graph_igraph(B: ig.Graph) -> ig.Graph:
 
 # --- Isomorphism and Grouping ---
 
+# def canonical_form_without_weights(ig_graph: ig.Graph) -> tuple:
+#     """
+#     Generates a canonical representation (adjacency matrix) of the graph structure,
+#     ignoring edge weights and node/edge attributes other than connectivity.
+
+#     Uses igraph's canonical permutation.
+
+#     Parameters:
+#     -----------
+#     ig_graph : igraph.Graph
+#         The input graph.
+
+#     Returns:
+#     --------
+#     tuple
+#         A tuple representation of the permuted adjacency matrix, suitable for hashing or comparison.
+#     """
+#     if not isinstance(ig_graph, ig.Graph):
+#         raise TypeError("Input must be an igraph.Graph object.")
+#     if ig_graph.vcount() == 0:
+#         return tuple() # Handle empty graph
+
+#     try:
+#         # Get the canonical permutation based on graph structure only
+#         # color/label args are omitted to ignore attributes
+#         perm: List[int] = ig_graph.canonical_permutation()
+
+#         # Apply the permutation to the vertices
+#         permuted_graph: ig.Graph = ig_graph.permute_vertices(perm)
+
+#         # Get the adjacency matrix of the permuted graph
+#         # Use bool type to explicitly ignore weights
+#         adj_matrix: List[List[bool]] = permuted_graph.get_adjacency(type=ig.ADJ_BOOL).data
+
+#         # Convert the adjacency matrix (list of lists) to a tuple of tuples for immutability
+#         return tuple(map(tuple, adj_matrix))
+#     except Exception as e:
+#         print(f"Error generating canonical form for graph: {e}")
+#         raise
+
 def canonical_form_without_weights(ig_graph: ig.Graph) -> tuple:
     """
     Generates a canonical representation (adjacency matrix) of the graph structure,
     ignoring edge weights and node/edge attributes other than connectivity.
 
-    Uses igraph's canonical permutation.
+    Uses igraph's canonical permutation. (Corrected version)
 
     Parameters:
     -----------
@@ -145,7 +185,8 @@ def canonical_form_without_weights(ig_graph: ig.Graph) -> tuple:
     Returns:
     --------
     tuple
-        A tuple representation of the permuted adjacency matrix, suitable for hashing or comparison.
+        A tuple representation of the permuted boolean adjacency matrix,
+        suitable for hashing or comparison.
     """
     if not isinstance(ig_graph, ig.Graph):
         raise TypeError("Input must be an igraph.Graph object.")
@@ -154,23 +195,34 @@ def canonical_form_without_weights(ig_graph: ig.Graph) -> tuple:
 
     try:
         # Get the canonical permutation based on graph structure only
-        # color/label args are omitted to ignore attributes
         perm: List[int] = ig_graph.canonical_permutation()
 
         # Apply the permutation to the vertices
         permuted_graph: ig.Graph = ig_graph.permute_vertices(perm)
 
-        # Get the adjacency matrix of the permuted graph
-        # Use bool type to explicitly ignore weights
-        adj_matrix: List[List[bool]] = permuted_graph.get_adjacency(type=ig.ADJ_BOOL).data
+        # Get the default numerical adjacency matrix
+        adj_matrix_obj = permuted_graph.get_adjacency()
+        adj_matrix_data: List[List[float]] = adj_matrix_obj.data # Usually float
 
-        # Convert the adjacency matrix (list of lists) to a tuple of tuples for immutability
-        return tuple(map(tuple, adj_matrix))
+        # Convert the numerical data to boolean (True if edge exists, False otherwise)
+        # An edge exists if the corresponding value is non-zero.
+        adj_matrix_bool_data: List[List[bool]] = [
+            [bool(value != 0) for value in row] for row in adj_matrix_data
+        ]
+
+        # Convert the boolean adjacency matrix (list of lists) to a tuple of tuples for immutability
+        return tuple(map(tuple, adj_matrix_bool_data))
+
+    except AttributeError as ae:
+        # Catch potential issues with get_adjacency() or data attribute if API changed drastically
+        print(f"Error accessing adjacency data or permutation: {ae}")
+        raise
     except Exception as e:
         print(f"Error generating canonical form for graph: {e}")
         raise
 
 
+# --- Helper function used by process_and_group_by_canonical_form ---
 def generate_hash_from_canonical_form(canonical_form: tuple) -> str:
     """
     Generates a SHA-256 hash from the canonical form tuple.
