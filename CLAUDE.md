@@ -20,3 +20,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Main code in Python (.py) files and Jupyter notebooks (.ipynb)
 - Parallel implementations in `/parallel` directory
 - Use pickle for serialization of quantum states
+
+## Current Directory Files Analysis
+- **CLAUDE.md**: Instructions file for Claude AI with guidance on code style and commands
+- **LQN_all_case_parallel copy.py**: Entry point script for processing EPM graphs and saving results
+- **LQN_igraph_copy.py**: Core library implementing graph algorithms using igraph for EPM analysis
+- **README.md**: Project documentation
+- **canonical_graph_igraph_modified_find_target.ipynb**: Notebook for analyzing canonical graphs and quantum states
+- **quantum_states_full.pkl**: Serialized data file storing quantum states from graph analysis
+- **run_LQN.sbatch**: SLURM batch script for running LQN simulations on HPC clusters
+- **run_LQN_parallel.sbatch**: SLURM batch script for parallel execution of LQN simulations
+
+These root-level files constitute a framework for quantum state analysis using graph theory, particularly focused on Entanglement Partition Measurement (EPM). The system uses canonical forms of bipartite graphs to identify unique quantum states, supports both sequential and parallel execution through HPC integration, and employs pickle files for data persistence. The codebase includes both library files (LQN_igraph_copy.py) and application entry points, with SLURM scripts for cluster deployment.
