@@ -8,7 +8,7 @@
 #SBATCH --time=9999:00:00       # Adjusted time, ensure this matches your job's needs
 
 echo "Start time: $(date)"
-
+s
 ulimit -s unlimited
 
 echo "SLURM job directory: $SLURM_SUBMIT_DIR"

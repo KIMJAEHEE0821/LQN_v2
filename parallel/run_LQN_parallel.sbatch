@@ -8,6 +8,7 @@
 #SBATCH --output=epm_%j.out  # Standard output (%j is replaced with job ID)
 #SBATCH --error=epm_%j.err   # Standard error
 #SBATCH --time=72:00:00      # Maximum execution time (3 days, adjust as needed)
+#SBATCH -w wnode02
 
 # Variables are passed when submitting the job: sbatch --export=VAR1=3,VAR2=3 run_job.sh
 # VAR1: num_system, VAR2: num_ancilla
