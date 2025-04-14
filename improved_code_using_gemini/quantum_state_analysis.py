@@ -184,6 +184,7 @@ def dfs_all_matchings(
 ) -> None:
     """
     Recursive Depth-First Search function to find all perfect matchings.
+    Edges with weight 3.0 are IGNORED when generating the weight string.
 
     Parameters:
     -----------
@@ -202,19 +203,26 @@ def dfs_all_matchings(
     all_matchings : List[List[Tuple[int, int, float]]]
         List to store all found perfect matchings (as lists of edges).
     all_weight_strings : List[str]
-        List to store the corresponding weight strings for each perfect matching.
+        List to store the corresponding weight strings (state representations, potentially truncated)
+        for each perfect matching.
     """
     # Base case: If all nodes in U have been matched, we found a perfect matching
     if u_index == len(U):
-        # Check if it's a valid perfect matching (should be if |U|==|V| and logic is correct)
-        # if is_perfect_matching(G, U, V, current_matching): # This check might be redundant if logic is sound
         all_matchings.append(current_matching[:]) # Store a copy
 
         # Generate the weight string (state representation)
-        # Mapping: weight 1.0 -> '0', weight 2.0 -> '1', weight 3.0 -> '2' (or ignore)
-        # The order matters, ensure consistent ordering (e.g., sort by U node index)
+        # Mapping: weight 1.0 -> '0', weight 2.0 -> '1', weight 3.0 -> IGNORED
         # Sort edges by the index of the node in U to ensure consistent string order
-        sorted_matching = sorted(current_matching, key=lambda edge: U.index(edge[0]) if edge[0] in U else U.index(edge[1]))
+        # Note: Ensure U contains unique indices corresponding to one partition for sorting key to work reliably.
+        # If U can contain nodes from both partitions (less likely for bipartite matching context), adjust sorting key.
+        try:
+             # Assuming U corresponds to the indices that define the order for the state string
+             u_indices_map = {node_idx: i for i, node_idx in enumerate(U)}
+             # Sort based on the order defined by U
+             sorted_matching = sorted(current_matching, key=lambda edge: u_indices_map.get(edge[0], float('inf')))
+        except Exception as e_sort:
+             print(f"Warning: Error during sorting matching edges based on U: {e_sort}. Using unsorted matching.")
+             sorted_matching = current_matching # Fallback to unsorted if error
 
         weights_list = []
         for u_matched, v_matched, weight in sorted_matching:
@@ -223,22 +231,25 @@ def dfs_all_matchings(
             elif weight == 2.0:
                 weights_list.append('1')
             elif weight == 3.0:
-                # Decide whether to include ancilla state '2' or ignore/map differently
-                # For now, let's map it to '2'
-                weights_list.append('2')
+                # --- 여기가 수정된 부분 ---
+                # Ignore edges with weight 3.0 (assumed to be ancilla)
+                pass # 가중치 3.0을 가진 엣지는 상태 문자열 생성 시 무시합니다.
+                # --- 수정 끝 ---
             else:
                 # Handle unexpected weights if necessary
-                print(f"Warning: Unexpected weight {weight} in matching. Ignoring.")
-                # Or assign a default/error character
+                print(f"Warning: Unexpected weight {weight} in matching for edge ({u_matched},{v_matched}). Ignoring edge in state string.")
+                # Or assign a default/error character, or raise an error
 
         matching_key = ''.join(weights_list)
-        all_weight_strings.append(matching_key)
+        all_weight_strings.append(matching_key) # Ancilla 정보가 제외된 문자열이 저장됩니다.
         return
-        # else: # Should not happen if |U| == |V| and DFS is correct
-        #    print("Error: DFS reached end but did not form a perfect matching.")
-        #    return
 
     # Current node from partition U to match
+    # Ensure u_index is within bounds of U
+    if u_index >= len(U):
+         # This case should ideally not be reached if base case is correct
+         print(f"Warning: u_index {u_index} out of bounds for U (len {len(U)}). Aborting path.")
+         return
     u = U[u_index]
 
     # Iterate through potential partners in partition V
@@ -246,6 +257,7 @@ def dfs_all_matchings(
         # Check if v is already matched in the current path
         if not matched_V.get(v, False): # Use .get for safety
             # Check if an edge exists between u and v and get its weight
+            # Ensure get_edge_weight is defined and handles non-existent edges returning None
             weight = get_edge_weight(G, u, v)
             if weight is not None:
                 # Add edge (u, v, weight) to the current matching
