@@ -579,103 +579,510 @@ def generate_combinations(n):
 
 
 def is_perfect_matching(G, matching):
-    # 완전 매칭은 모든 노드를 커버합니다 (이분 그래프의 경우 전체 노드의 절반)
-    return len(matching) == len(G.nodes) // 2
+    """
+    Check if a matching is a perfect matching for the graph.
+    
+    Parameters:
+    -----------
+    G : igraph.Graph
+        The bipartite graph
+    matching : list
+        List of edges in the matching
+        
+    Returns:
+    --------
+    bool
+        True if the matching is perfect, False otherwise
+    """
+    # Perfect matching should cover half of the nodes in bipartite graph
+    return len(matching) == len(G.vs) // 2
+
+def get_bipartite_sets(G):
+    """
+    Extract the bipartite sets from igraph object.
+    
+    Parameters:
+    -----------
+    G : igraph.Graph
+        The bipartite graph
+        
+    Returns:
+    --------
+    tuple
+        (U, V) where U and V are lists of node indices in each partition
+    """
+    # Check if graph has bipartite attribute
+    if 'bipartite' in G.vs.attributes():
+        U = [v.index for v in G.vs if v['bipartite'] == 0]
+        V = [v.index for v in G.vs if v['bipartite'] == 1]
+    elif 'category' in G.vs.attributes():
+        # Extract based on category attribute (for EPM graphs)
+        U = [v.index for v in G.vs if v['category'] in ['system_nodes', 'ancilla_nodes']]
+        V = [v.index for v in G.vs if v['category'] == 'sculpting_nodes']
+    else:
+        # If not explicitly marked, try to infer bipartite structure
+        # Assuming bipartite graph with equal sets
+        n = len(G.vs) // 2
+        U = list(range(0, n))
+        V = list(range(n, 2*n))
+    
+    return U, V
+
+def get_edge_weight(G, u, v):
+    """
+    Get weight of edge between u and v.
+    
+    Parameters:
+    -----------
+    G : igraph.Graph
+        The bipartite graph
+    u : int
+        Source node index
+    v : int
+        Target node index
+        
+    Returns:
+    --------
+    float or None
+        Weight of the edge if it exists, None otherwise
+    """
+    eid = G.get_eid(u, v, error=False)
+    if eid == -1:
+        return None
+    
+    if 'weight' in G.es.attributes():
+        # Just return the weight as is
+        return G.es[eid]['weight']
+    return '+'  # Default weight if not specified
+
+
 
 def dfs_all_matchings(G, U, V, current_matching, all_matchings, all_weights, matched, u_index=0):
-    if is_perfect_matching(G, current_matching):#U는 왼쪽 vertex, V는 오른쪽 vertex
-        #print(current_matching)
+    """
+    Use DFS to find all perfect matchings in a bipartite graph.
+    
+    Parameters:
+    -----------
+    G : igraph.Graph
+        The bipartite graph
+    U : list
+        List of node indices in the first partition
+    V : list
+        List of node indices in the second partition
+    current_matching : list
+        Current matching being built
+    all_matchings : list
+        List to store all perfect matchings found
+    all_weights : list
+        List to store weight strings for each perfect matching
+    matched : dict
+        Dictionary keeping track of which nodes are matched
+    u_index : int, optional
+        Current index in U to start from (default: 0)
+    """
+    if is_perfect_matching(G, current_matching):
         all_matchings.append(current_matching[:])
         
-        # Construct the weight string at the same time, excluding '+'여기서 +는 |+\rangle가 아님 문자 +
-        weights = ''.join([G[u][v]['weight'] for u, v in current_matching if G[u][v]['weight'] != '+'])
-        all_weights.append(weights)
+        # Map weights to corresponding quantum states:
+        # weight 1.0 -> state 0
+        # weight 2.0 -> state 1
+        # weight 3.0 -> state 2 (if needed)
+        weights_list = []
+        for u, v, w in current_matching:
+            if w == 1.0:
+                weights_list.append('0')
+            elif w == 2.0:
+                weights_list.append('1')
+            elif w == 3.0:
+                # Include state 2 only if we want to represent ancilla
+                # Currently skipping as per previous requirement
+                pass
         
+        matching_key = ''.join(weights_list)
+        all_weights.append(matching_key)
         return
 
-    # 현재 인덱스부터 시작하여 U를 반복하여 불필요한 확인을 피합니다
-    for i in range(u_index, len(U)): #U vertex list\
+    # Start from current index to avoid redundant checks
+    for i in range(u_index, len(U)):
         u = U[i]
-        #print(u, i)
-        if matched[u]: # matched[u]는 해당 vertex가 perfect matching 찾을때 쓰였는지 여부 조사
-            continue #matched[u]가 있으면 다음 for loop로 넘어감
+        if matched[u]:
+            continue
 
         for v in V:
-            #print(u,v, 'before')
-            if (u, v) in G.edges and not matched[v]:
-                #print(u,v, 'after')
-                current_matching.append((u, v))
-                #print(current_matching)
-                matched[u] = True
-                matched[v] = True
-                #print(u,v, matched[u], matched[v])
+            if not matched[v]:
+                # Check if edge exists
+                weight = get_edge_weight(G, u, v)
+                if weight is not None:
+                    current_matching.append((u, v, weight))
+                    matched[u] = True
+                    matched[v] = True
 
-                # 다음 인덱스로 U에 대해 재귀 호출
-                #print(i, 'check')
-                dfs_all_matchings(G, U, V, current_matching, all_matchings, all_weights, matched, i + 1)
-                #print(i, 'check2')
+                    # Recursive call with next index
+                    dfs_all_matchings(G, U, V, current_matching, all_matchings, all_weights, matched, i + 1)
 
-                # 백트래킹
-                matched[u] = False
-                matched[v] = False
-                #print(u,v, matched[u], matched[v], 'back')
-                #print(current_matching, 'back')
-                current_matching.pop()
-                #print(current_matching, 'pop')
+                    # Backtrack
+                    matched[u] = False
+                    matched[v] = False
+                    current_matching.pop()
 
 def find_all_perfect_matchings(G):
-    U = [n for n in G.nodes if G.nodes[n]['bipartite'] == 0] #bipartite 그래프는 두 그룹으로 나뉘어짐 왼쪽 vertex와 오른쪽 vertex 그 중에서 왼쪽 vertex를 0 그룹으로 둔거
-    V = [n for n in G.nodes if G.nodes[n]['bipartite'] == 1]
+    """
+    Find all perfect matchings in a bipartite graph.
+    
+    Parameters:
+    -----------
+    G : igraph.Graph
+        The bipartite graph
+        
+    Returns:
+    --------
+    tuple
+        (all_matchings, all_weights) where:
+        - all_matchings is a list of perfect matchings
+        - all_weights is a list of weight strings for each matching
+    """
+    U, V = get_bipartite_sets(G)
     all_matchings = []
-    all_weights = []  # List to store the weight strings
-    matched = {node: False for node in G.nodes}
+    all_weights = []
+    matched = {node: False for node in range(len(G.vs))}
 
-    dfs_all_matchings(G, U, V, [], all_matchings, all_weights, matched) ##여기 나오는 []는 dfs_all_matghings에서 current matching에 해당함. 
+    dfs_all_matchings(G, U, V, [], all_matchings, all_weights, matched)
     
     return all_matchings, all_weights
 
-def find_unused_edges(G, perfect_matchings):
-    # Create a set of all edges used in any perfect matching
-    used_edges = []
-    for matching in perfect_matchings:
-        for edge in matching:
-            used_edges.append((edge[0], edge[1]))  # Only consider the nodes, not the weight
 
-    # Find all unused edges by comparing with the edges in the graph
-    unused_edges = [edge for edge in G.edges if edge not in used_edges]
+def find_unused_edges(G, perfect_matchings):
+    """
+    Find edges that are not used in any perfect matching.
+    
+    Parameters:
+    -----------
+    G : igraph.Graph
+        The bipartite graph
+    perfect_matchings : list
+        List of perfect matchings
+        
+    Returns:
+    --------
+    list
+        List of edges (as tuples) that are not used in any perfect matching
+    """
+    # Create a set of all edges used in any perfect matching
+    used_edges = set()
+    for matching in perfect_matchings:
+        for u, v, _ in matching:
+            used_edges.add((u, v))
+            used_edges.add((v, u))  # Add both directions since igraph may use either
+
+    # Find unused edges
+    unused_edges = []
+    for edge in G.es:
+        edge_tuple = (edge.source, edge.target)
+        if edge_tuple not in used_edges:
+            unused_edges.append(edge_tuple)
+    
     return unused_edges
 
-def find_pm_of_bigraph(bigraph_result, digraph_result):
+def find_pm_of_bigraph(graph_list):
+    """
+    Find perfect matchings for each graph in the list.
+    
+    Parameters:
+    -----------
+    graph_list : list
+        List of igraph.Graph objects
+        
+    Returns:
+    --------
+    list
+        List of [Counter(weight_strings), perfect_matchings, graph, index] for valid graphs
+    """
     save_fw_results = []
 
-    for i in range(len(bigraph_result)):
-        perfect_matching_result, weight_strings = find_all_perfect_matchings(bigraph_result[i][0])
-        if not find_unused_edges(bigraph_result[i][0], perfect_matching_result) and len(perfect_matching_result) >= 2:
-            save_fw_results.append([Counter(weight_strings), perfect_matching_result, bigraph_result[i], digraph_result[i]])
+    for i, G in enumerate(graph_list):
+        perfect_matching_result, weight_strings = find_all_perfect_matchings(G)
+        
+        if not find_unused_edges(G, perfect_matching_result) and len(perfect_matching_result) >= 2:
+            save_fw_results.append([
+                Counter(weight_strings),
+                perfect_matching_result,
+                G,
+                i  # Index in the original graph list
+            ])
+    
+    # Normalize coefficients using GCD
     for i in save_fw_results:
-        values = list(i[0].values()) #결과에서 state들의 coefficient를 최대공약수로 나눔. 
-        gcd_of_values = reduce(gcd, values)
-        for key in i[0]:
-            i[0][key] //= gcd_of_values
+        values = list(i[0].values())
+        if values:
+            gcd_of_values = reduce(gcd, values)
+            for key in i[0]:
+                i[0][key] //= gcd_of_values
+    
     return save_fw_results
 
 def remove_same_state(save_fw_results):
-    # Set to keep track of unique dictionaries
+    """
+    Remove duplicate states based on weight counters.
+    
+    Parameters:
+    -----------
+    save_fw_results : list
+        List of [Counter(weight_strings), perfect_matchings, graph, index]
+        
+    Returns:
+    --------
+    list
+        List of unique entries based on state counter
+    """
     seen = set()
-
-    # List to store only the first occurrence of each unique dictionary
     unique_counters = []
 
-    # Iterate over each Counter object
     for counter in save_fw_results:
-        # Convert Counter to a tuple of sorted items for comparison
         counter_tuple = tuple(sorted(counter[0].items()))
         
-        # If this tuple hasn't been seen before, add it to the list and the set
         if counter_tuple not in seen:
             seen.add(counter_tuple)
             unique_counters.append(counter)
+    
     return unique_counters
+
+
+def apply_bit_flip(state, positions):
+    """
+    Apply X-operator (bit flip) to specified positions in a quantum state.
+    
+    Parameters:
+    -----------
+    state : str
+        Quantum state as a string (e.g. '0101')
+    positions : list
+        List of positions to flip (0-indexed from left)
+        
+    Returns:
+    --------
+    str
+        New quantum state after applying bit flips
+    """
+    state_list = list(state)
+    for pos in positions:
+        if pos < len(state_list):
+            # Flip 0 -> 1 or 1 -> 0
+            state_list[pos] = '1' if state_list[pos] == '0' else '0'
+    
+    return ''.join(state_list)
+
+def check_quantum_states_with_bit_flips(result_dict, target_states, bit_flip_positions=None, hash_key=None):
+    """
+    Check if quantum states exist, considering possible bit flips at specified positions.
+    
+    Parameters:
+    -----------
+    result_dict : dict
+        Result dictionary returned from process_graph_dict() function
+    target_states : list or str
+        List of quantum states to search for, or a single state as string
+    bit_flip_positions : list or None
+        List of positions where bit flips should be tried.
+        If None, all possible combinations of bit flips will be tried.
+        For example: [0] means try flipping only the leftmost bit
+                     [0,1] means try flipping leftmost, second bit, or both
+    hash_key : str, optional
+        Specific hash key to search within (default: None, search all hashes)
+        
+    Returns:
+    --------
+    list
+        [(hash_key, {original_state: flipped_state}, {flipped_state: coefficient}, graph_index, bit_flip_applied), ...]
+        List of results where states were found after possible bit flips:
+        - hash_key: Hash key where the states were found
+        - original_to_flipped: Mapping from original states to the states after bit flips
+        - state_coefficients: Dictionary of flipped states and their coefficients
+        - graph_index: Index in the original graph list
+        - bit_flip_applied: List of positions where bits were flipped
+    """
+    results = []
+    
+    # Convert single state to list for consistent processing
+    if isinstance(target_states, str):
+        target_states = [target_states]
+    
+    # Determine hash keys to search
+    if hash_key is not None:
+        if hash_key not in result_dict:
+            return []
+        hash_keys = [hash_key]
+    else:
+        hash_keys = result_dict.keys()
+    
+    # If no specific positions provided, assume all positions could have bit flips
+    if bit_flip_positions is None and len(target_states) > 0 and len(target_states[0]) > 0:
+        max_length = max(len(state) for state in target_states)
+        bit_flip_positions = list(range(max_length))
+    
+    # Generate all possible combinations of bit flip positions
+    from itertools import combinations, chain
+    all_combinations = list(chain.from_iterable(
+        combinations(bit_flip_positions, r) for r in range(len(bit_flip_positions) + 1)
+    ))
+    
+    # Search through each hash key and try each bit flip combination
+    for key in hash_keys:
+        for state_data in result_dict[key]:
+            counter = state_data[0]  # State coefficient Counter
+            graph_index = state_data[3]  # Graph index
+            
+            for bit_positions in all_combinations:
+                # Skip empty combination (no bit flips) if there are other combinations
+                if not bit_positions and len(all_combinations) > 1:
+                    continue
+                
+                # Apply bit flips to target states
+                flipped_targets = [apply_bit_flip(state, bit_positions) for state in target_states]
+                
+                # Check if all flipped target states exist in this counter
+                all_states_exist = all(state in counter for state in flipped_targets)
+                
+                if all_states_exist:
+                    # Create mapping from original states to flipped states
+                    original_to_flipped = {original: flipped for original, flipped in zip(target_states, flipped_targets)}
+                    
+                    # Create dictionary of flipped states and their coefficients
+                    state_coefficients = {state: counter[state] for state in flipped_targets}
+                    
+                    results.append((
+                        key, 
+                        original_to_flipped,
+                        state_coefficients, 
+                        graph_index, 
+                        list(bit_positions)
+                    ))
+    
+    return results
+
+def check_quantum_states_exist(result_dict, target_states, hash_key=None):
+    """
+    Check if all specified quantum states exist in the results.
+    
+    Parameters:
+    -----------
+    result_dict : dict
+        Result dictionary returned from process_graph_dict() function
+    target_states : list or str
+        List of quantum states to search for (e.g. ['0101', '1010']) or a single state as string
+    hash_key : str, optional
+        Specific hash key to search within (default: None, search all hashes)
+        
+    Returns:
+    --------
+    list
+        [(hash_key, {state1: coefficient1, state2: coefficient2, ...}, graph_index), ...] 
+        List of results where all target states exist:
+        - hash_key: Hash key where the states were found
+        - state_coefficients: Dictionary of states and their coefficients
+        - graph_index: Index in the original graph list
+    """
+    results = []
+    
+    # Convert single state string to list for consistent processing
+    if isinstance(target_states, str):
+        target_states = [target_states]
+    
+    # Determine which hash keys to search
+    if hash_key is not None:
+        if hash_key not in result_dict:
+            return []
+        hash_keys = [hash_key]
+    else:
+        hash_keys = result_dict.keys()
+    
+    # Search through each hash key
+    for key in hash_keys:
+        for state_data in result_dict[key]:
+            counter = state_data[0]  # State coefficient Counter
+            graph_index = state_data[3]  # Graph index
+            
+            # Check if all target states exist in this counter
+            all_states_exist = all(state in counter for state in target_states)
+            
+            if all_states_exist:
+                # Create dictionary of states and their coefficients
+                state_coefficients = {state: counter[state] for state in target_states}
+                results.append((key, state_coefficients, graph_index))
+    
+    return results
+
+def process_graph_dict(graph_dict):
+    """
+    Process dictionary of graphs to find states.
+    
+    Parameters:
+    -----------
+    graph_dict : dict
+        Dictionary mapping hash keys to lists of igraph.Graph objects
+        
+    Returns:
+    --------
+    dict
+        Dictionary mapping hash keys to lists of [Counter, matchings, graph, index]
+    """
+    result_dict = {}
+    
+    for hash_key, graph_list in graph_dict.items():
+        # Find perfect matchings for this graph list
+        fw_results = find_pm_of_bigraph(graph_list)
+        
+        # Remove duplicate states
+        unique_results = remove_same_state(fw_results)
+        
+        # Add to result dictionary
+        if unique_results:
+            result_dict[hash_key] = unique_results
+    
+    return result_dict
+
+def get_all_quantum_states(result_dict, hash_key=None):
+    """
+    Returns all quantum states found in the results.
+    
+    Parameters:
+    -----------
+    result_dict : dict
+        Result dictionary returned from process_graph_dict() function
+    hash_key : str, optional
+        Specific hash key to search within (default: None, search all hashes)
+        
+    Returns:
+    --------
+    dict
+        {hash_key: {state: [(coefficient, graph_index), ...], ...}, ...}
+        Dictionary mapping each hash key to its states and occurrences
+    """
+    states_dict = {}
+    
+    # Determine which hash keys to search
+    if hash_key is not None:
+        if hash_key not in result_dict:
+            return {}
+        hash_keys = [hash_key]
+    else:
+        hash_keys = result_dict.keys()
+    
+    # Collect states from each hash key
+    for key in hash_keys:
+        states_dict[key] = {}
+        
+        for state_data in result_dict[key]:
+            counter = state_data[0]  # State coefficient Counter
+            graph_index = state_data[3]  # Graph index
+            
+            # Store all states
+            for state, coefficient in counter.items():
+                if state not in states_dict[key]:
+                    states_dict[key][state] = []
+                states_dict[key][state].append((coefficient, graph_index))
+    
+    return states_dict
+
 
 def gen_grouped_counters(unique_counters):
     # Group dictionaries by their value frequencies
