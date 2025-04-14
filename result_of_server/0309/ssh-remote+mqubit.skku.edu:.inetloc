@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>URL</key>
-	<string>vscode-remote://ssh-remote%2Bmqubit.skku.edu/home/jaeheekim/QC/LQN_parallel_igraph/bigraph_result_sys3_anc2_typedefault.pkl</string>
-</dict>
-</plist>
