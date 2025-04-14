@@ -119,7 +119,7 @@ def get_edge_weight(G: ig.Graph, u: int, v: int) -> Optional[float]:
         return None
 
 
-def is_perfect_matching(G: igraph.Graph, U: List[int], V: List[int], matching_edges: List[Tuple[int, int, float]]) -> bool:
+def is_perfect_matching(G: ig.Graph, U: List[int], V: List[int], matching_edges: List[Tuple[int, int, float]]) -> bool:
     """
     Checks if a given set of edges constitutes a perfect matching in the bipartite graph G.
 
