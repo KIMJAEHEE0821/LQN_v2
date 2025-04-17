@@ -1,6 +1,0 @@
-# requirements.txt
-igraph
-numpy
-sympy
-matplotlib
-networkx
