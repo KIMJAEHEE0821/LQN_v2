@@ -619,8 +619,6 @@ def check_quantum_states_exist(result_dict, target_states, hash_key=None):
     return results
 
 
-# state_analyzer.py
-
 # --- Import the apply_bit_flip function from the other file ---
 try:
     from quantum_utils import apply_bit_flip
