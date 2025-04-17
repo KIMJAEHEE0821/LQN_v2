@@ -293,3 +293,28 @@ def sorted_qs(
         save_sorted_qs[key] = unique_data
     return save_sorted_qs
 
+# --- Helper Function ---
+def apply_bit_flip(state: str, positions: List[int]) -> str:
+    """
+    Apply X-operator (bit flip) to specified positions in a quantum state string.
+    Checks for valid, non-negative indices within the state length.
+
+    Parameters:
+    -----------
+    state : str
+        The quantum state string (e.g., '010').
+    positions : List[int]
+        List of 0-based indices to flip. Invalid indices are ignored.
+
+    Returns:
+    --------
+    str
+        The state string after applying the bit flips.
+    """
+    state_list = list(state)
+    for pos in positions:
+        # Check if the position is a valid non-negative index
+        if 0 <= pos < len(state_list):
+            state_list[pos] = '1' if state_list[pos] == '0' else '0'
+        # else: Silently ignore invalid positions (out of range or negative)
+    return ''.join(state_list)

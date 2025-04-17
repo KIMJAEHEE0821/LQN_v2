@@ -6,12 +6,22 @@ Functions for Perfect Matching analysis and initial Quantum State processing.
 
 import igraph as ig
 import itertools
+from itertools import combinations, permutations, groupby, chain
 import numpy as np
+import matplotlib.pyplot as plt
+import networkx as nx
+import random
+import pickle
+from copy import deepcopy
+import hashlib
 from collections import Counter, defaultdict
 from functools import reduce
 from math import gcd
-from typing import List, Tuple, Dict, Any, Set, Optional, Counter as CounterType, Iterable, Sequence # For type hinting
-import sympy as sp # Used for quantum notation conversion later if needed
+from typing import List, Tuple, Dict, Any, Set, Optional, Union, Counter as CounterType, Iterable, Sequence
+import sympy as sp
+from sympy.physics.quantum import Ket
+from sympy import Add
+from quantum_utils import *
 
 # ==============================================================================
 # Section 1: Perfect Matching Analysis Functions
@@ -119,7 +129,7 @@ def get_edge_weight(G: ig.Graph, u: int, v: int) -> Optional[float]:
         return None
 
 
-def is_perfect_matching(G: igraph.Graph, U: List[int], V: List[int], matching_edges: List[Tuple[int, int, float]]) -> bool:
+def is_perfect_matching(G: ig.Graph, U: List[int], V: List[int], matching_edges: List[Tuple[int, int, float]]) -> bool:
     """
     Checks if a given set of edges constitutes a perfect matching in the bipartite graph G.
 
@@ -184,6 +194,7 @@ def dfs_all_matchings(
 ) -> None:
     """
     Recursive Depth-First Search function to find all perfect matchings.
+    Edges with weight 3.0 are IGNORED when generating the weight string.
 
     Parameters:
     -----------
@@ -202,19 +213,26 @@ def dfs_all_matchings(
     all_matchings : List[List[Tuple[int, int, float]]]
         List to store all found perfect matchings (as lists of edges).
     all_weight_strings : List[str]
-        List to store the corresponding weight strings for each perfect matching.
+        List to store the corresponding weight strings (state representations, potentially truncated)
+        for each perfect matching.
     """
     # Base case: If all nodes in U have been matched, we found a perfect matching
     if u_index == len(U):
-        # Check if it's a valid perfect matching (should be if |U|==|V| and logic is correct)
-        # if is_perfect_matching(G, U, V, current_matching): # This check might be redundant if logic is sound
         all_matchings.append(current_matching[:]) # Store a copy
 
         # Generate the weight string (state representation)
-        # Mapping: weight 1.0 -> '0', weight 2.0 -> '1', weight 3.0 -> '2' (or ignore)
-        # The order matters, ensure consistent ordering (e.g., sort by U node index)
+        # Mapping: weight 1.0 -> '0', weight 2.0 -> '1', weight 3.0 -> IGNORED
         # Sort edges by the index of the node in U to ensure consistent string order
-        sorted_matching = sorted(current_matching, key=lambda edge: U.index(edge[0]) if edge[0] in U else U.index(edge[1]))
+        # Note: Ensure U contains unique indices corresponding to one partition for sorting key to work reliably.
+        # If U can contain nodes from both partitions (less likely for bipartite matching context), adjust sorting key.
+        try:
+             # Assuming U corresponds to the indices that define the order for the state string
+             u_indices_map = {node_idx: i for i, node_idx in enumerate(U)}
+             # Sort based on the order defined by U
+             sorted_matching = sorted(current_matching, key=lambda edge: u_indices_map.get(edge[0], float('inf')))
+        except Exception as e_sort:
+             print(f"Warning: Error during sorting matching edges based on U: {e_sort}. Using unsorted matching.")
+             sorted_matching = current_matching # Fallback to unsorted if error
 
         weights_list = []
         for u_matched, v_matched, weight in sorted_matching:
@@ -223,22 +241,25 @@ def dfs_all_matchings(
             elif weight == 2.0:
                 weights_list.append('1')
             elif weight == 3.0:
-                # Decide whether to include ancilla state '2' or ignore/map differently
-                # For now, let's map it to '2'
-                weights_list.append('2')
+                # --- 여기가 수정된 부분 ---
+                # Ignore edges with weight 3.0 (assumed to be ancilla)
+                pass # 가중치 3.0을 가진 엣지는 상태 문자열 생성 시 무시합니다.
+                # --- 수정 끝 ---
             else:
                 # Handle unexpected weights if necessary
-                print(f"Warning: Unexpected weight {weight} in matching. Ignoring.")
-                # Or assign a default/error character
+                print(f"Warning: Unexpected weight {weight} in matching for edge ({u_matched},{v_matched}). Ignoring edge in state string.")
+                # Or assign a default/error character, or raise an error
 
         matching_key = ''.join(weights_list)
-        all_weight_strings.append(matching_key)
+        all_weight_strings.append(matching_key) # Ancilla 정보가 제외된 문자열이 저장됩니다.
         return
-        # else: # Should not happen if |U| == |V| and DFS is correct
-        #    print("Error: DFS reached end but did not form a perfect matching.")
-        #    return
 
     # Current node from partition U to match
+    # Ensure u_index is within bounds of U
+    if u_index >= len(U):
+         # This case should ideally not be reached if base case is correct
+         print(f"Warning: u_index {u_index} out of bounds for U (len {len(U)}). Aborting path.")
+         return
     u = U[u_index]
 
     # Iterate through potential partners in partition V
@@ -246,6 +267,7 @@ def dfs_all_matchings(
         # Check if v is already matched in the current path
         if not matched_V.get(v, False): # Use .get for safety
             # Check if an edge exists between u and v and get its weight
+            # Ensure get_edge_weight is defined and handles non-existent edges returning None
             weight = get_edge_weight(G, u, v)
             if weight is not None:
                 # Add edge (u, v, weight) to the current matching
@@ -540,889 +562,992 @@ def process_graph_dict(graph_dict: Dict[str, List[ig.Graph]]) -> Dict[str, List[
 
 
 # ==============================================================================
-# Section 3: Quantum State Equivalence Checking and Filtering Functions
+# Section 3: 
 # ==============================================================================
 
-# --- Permutation-based Equivalence ---
-
-def apply_permutation_to_keys(counter: CounterType[str], permutation: Sequence[int]) -> CounterType[str]:
+def check_quantum_states_exist(result_dict, target_states, hash_key=None):
     """
-    Applies a permutation to the keys (bit strings) of a Counter.
-
-    Example: counter={'010': 5}, permutation=(1, 0, 2) -> returns {'100': 5}
-
+    Check if all specified quantum states exist in the results.
+    
     Parameters:
     -----------
-    counter : CounterType[str]
-        The input Counter where keys are bit strings of the same length.
-    permutation : Sequence[int]
-        A sequence (e.g., tuple) representing the new order of indices.
-        Example: (1, 0, 2) means the bit at index 1 comes first, then index 0, then index 2.
-
+    result_dict : dict
+        Result dictionary returned from process_graph_dict() function
+    target_states : list or str
+        List of quantum states to search for (e.g. ['0101', '1010']) or a single state as string
+    hash_key : str, optional
+        Specific hash key to search within (default: None, search all hashes)
+        
     Returns:
     --------
-    CounterType[str]
-        A new Counter with permuted keys.
-
-    Raises:
-    ------
-    ValueError:
-        If the permutation length doesn't match the key length or if keys have varying lengths.
-    IndexError:
-        If permutation contains invalid indices.
+    list
+        [(hash_key, {state1: coefficient1, state2: coefficient2, ...}, graph_index), ...] 
+        List of results where all target states exist:
+        - hash_key: Hash key where the states were found
+        - state_coefficients: Dictionary of states and their coefficients
+        - graph_index: Index in the original graph list
     """
-    transformed_counter: CounterType[str] = Counter()
-    key_length = -1
-
-    if not counter:
-        return transformed_counter # Return empty counter if input is empty
-
-    for key, value in counter.items():
-        if key_length == -1:
-            key_length = len(key)
-            # Check permutation validity once
-            if len(permutation) != key_length:
-                raise ValueError(f"Permutation length {len(permutation)} must match key length {key_length}.")
-            if not all(0 <= i < key_length for i in permutation):
-                 raise IndexError("Permutation contains invalid indices.")
-            if len(set(permutation)) != key_length:
-                 raise ValueError("Permutation must contain unique indices.")
-
-        elif len(key) != key_length:
-            raise ValueError("All keys in the Counter must have the same length.")
-
-        # Apply permutation
-        try:
-            new_key_list = [key[i] for i in permutation]
-            new_key = ''.join(new_key_list)
-            transformed_counter[new_key] = value
-        except IndexError:
-            # This should theoretically not happen if initial checks pass
-            raise IndexError(f"Error applying permutation {permutation} to key {key}. Invalid index.")
-
-    return transformed_counter
-
-
-def remove_duplicate_counters(data_list: List[List[Any]]) -> List[List[Any]]:
-    """
-    Removes duplicate entries from a list based on permutation equivalence of their state Counters.
-
-    Compares each Counter with others, applying all possible permutations to the keys.
-    Keeps only one representative for each permutation equivalence class.
-
-    Parameters:
-    -----------
-    data_list : List[List[Any]]
-        A list where each inner list is expected to have a Counter object
-        at index 0 (e.g., [Counter, matchings, graph, index]).
-
-    Returns:
-    --------
-    List[List[Any]]
-        A filtered list containing only entries with unique Counters up to key permutation.
-    """
-    if not data_list:
-        return []
-
-    indices_to_remove: Set[int] = set()
-    n_elements = len(data_list)
-    unique_representatives: List[List[Any]] = [] # Stores the first encountered representative
-
-    # Pre-calculate permutations if all counters have the same key length
-    first_counter = data_list[0][0]
-    if not isinstance(first_counter, Counter) or not first_counter:
-         print("Warning: First element's counter is invalid or empty in remove_duplicate_counters. Cannot determine permutations.")
-         # Fallback or error handling needed - let's assume valid for now
-         # Or iterate and determine per counter comparison if lengths vary (less efficient)
-         return data_list # Return original if cannot proceed safely
-
-    try:
-        n_bits = len(next(iter(first_counter))) # Get length from first key of first counter
-        all_permutations = list(itertools.permutations(range(n_bits)))
-    except (StopIteration, TypeError):
-        print("Warning: Could not determine key length from first counter. Skipping permutation check.")
-        return data_list # Return original if cannot proceed safely
-
-
-    for i in range(n_elements):
-        if i in indices_to_remove:
-            continue # Skip if already marked for removal
-
-        # Add the current element as a potential unique representative
-        unique_representatives.append(data_list[i])
-        counter1 = data_list[i][0]
-        if not isinstance(counter1, Counter): continue # Skip invalid entries
-
-        # Check against subsequent elements
-        for j in range(i + 1, n_elements):
-            if j in indices_to_remove:
-                continue
-
-            counter2 = data_list[j][0]
-            if not isinstance(counter2, Counter): continue
-
-            # Basic check: must have same number of states and same coefficients (values)
-            if len(counter1) != len(counter2) or sorted(counter1.values()) != sorted(counter2.values()):
-                continue
-
-            # Check if counter2 is a permutation of counter1
-            is_permutation_equivalent = False
-            try:
-                # Optimization: Check if key lengths match before permutations
-                len1 = len(next(iter(counter1))) if counter1 else -1
-                len2 = len(next(iter(counter2))) if counter2 else -1
-                if len1 != len2 or len1 == -1:
-                     continue # Cannot be permutation equivalent if lengths differ or empty
-
-                # Check against all permutations of counter1
-                for p in all_permutations:
-                    transformed_counter1 = apply_permutation_to_keys(counter1, p)
-                    if transformed_counter1 == counter2:
-                        is_permutation_equivalent = True
-                        break # Found equivalence
-            except Exception as e:
-                 print(f"Warning: Error during permutation check between index {i} and {j}: {e}. Assuming not equivalent.")
-
-            if is_permutation_equivalent:
-                indices_to_remove.add(j) # Mark j for removal
-
-    # Filter the original list based on indices not marked for removal
-    final_unique_list = [data_list[k] for k in range(n_elements) if k not in indices_to_remove]
-
-    print(f"Removed {len(indices_to_remove)} entries based on key permutation equivalence. Kept {len(final_unique_list)}.")
-    return final_unique_list
-
-
-def remove_duplicate_counters_full_list(grouped_counters: Dict[Any, List[List[Any]]]) -> Dict[Any, List[List[Any]]]:
-    """
-    Applies `remove_duplicate_counters` to each list within a dictionary of grouped results.
-
-    Parameters:
-    -----------
-    grouped_counters : Dict[Any, List[List[Any]]]
-         A dictionary where keys might represent groups (e.g., by coefficient counts)
-         and values are lists of [Counter, ...] entries.
-
-    Returns:
-    --------
-    Dict[Any, List[List[Any]]]
-        A dictionary with the same keys but with filtered lists as values.
-    """
-    save_filtered_data: Dict[Any, List[List[Any]]] = {}
-    print("Applying permutation-based duplicate removal to grouped counters...")
-    for key, data_list in grouped_counters.items():
-        # print(f"Processing group with key: {key} (Size: {len(data_list)})")
-        filtered_list = remove_duplicate_counters(data_list)
-        save_filtered_data[key] = filtered_list
-    print("Permutation-based filtering complete for all groups.")
-    return save_filtered_data
-
-# --- Bit-Flip-based Equivalence ---
-
-def flip_bit_string(binary_str: str, n: int) -> str:
-    """
-    Flips the n-th bit (0-indexed) of a binary string.
-
-    Parameters:
-    -----------
-    binary_str : str
-        The input binary string.
-    n : int
-        The index of the bit to flip.
-
-    Returns:
-    --------
-    str
-        The binary string with the n-th bit flipped.
-
-    Raises:
-    ------
-    IndexError: If n is out of bounds.
-    ValueError: If the character at index n is not '0' or '1'.
-    """
-    if not 0 <= n < len(binary_str):
-        raise IndexError(f"Index {n} is out of bounds for string of length {len(binary_str)}.")
-
-    bit_list = list(binary_str)
-    if bit_list[n] == '0':
-        bit_list[n] = '1'
-    elif bit_list[n] == '1':
-        bit_list[n] = '0'
-    else:
-        raise ValueError(f"Character at index {n} is '{bit_list[n]}', not '0' or '1'.")
-
-    return ''.join(bit_list)
-
-
-def flip_multiple_bits(binary_str: str, positions: Iterable[int]) -> str:
-    """
-    Flips bits at multiple specified positions in a binary string.
-
-    Parameters:
-    -----------
-    binary_str : str
-        The input binary string.
-    positions : Iterable[int]
-        An iterable (e.g., list, tuple) of 0-indexed positions to flip.
-
-    Returns:
-    --------
-    str
-        The binary string with bits flipped at the specified positions.
-    """
-    bit_list = list(binary_str)
-    str_len = len(binary_str)
-    for pos in positions:
-        if not 0 <= pos < str_len:
-            raise IndexError(f"Position {pos} is out of bounds for string of length {str_len}.")
-        if bit_list[pos] == '0':
-            bit_list[pos] = '1'
-        elif bit_list[pos] == '1':
-            bit_list[pos] = '0'
-        else:
-            raise ValueError(f"Character at index {pos} is '{bit_list[pos]}', not '0' or '1'.")
-    return ''.join(bit_list)
-
-
-def find_transformation(counter1: CounterType[str], counter2: CounterType[str]) -> Optional[Tuple[int, ...]]:
-    """
-    Checks if counter2 can be obtained from counter1 by flipping the same set of bits
-    in all keys of counter1.
-
-    Parameters:
-    -----------
-    counter1 : CounterType[str]
-        The starting Counter.
-    counter2 : CounterType[str]
-        The target Counter.
-
-    Returns:
-    --------
-    Optional[Tuple[int, ...]]
-        A tuple containing the 0-indexed positions of the bits that need to be flipped
-        to transform counter1 to counter2. Returns None if no such transformation exists
-        or if counters are incompatible (different sizes, different values, empty, etc.).
-    """
-    if len(counter1) != len(counter2) or not counter1:
-        return None # Cannot transform if sizes differ or empty
-    if sorted(counter1.values()) != sorted(counter2.values()):
-        return None # Coefficients must match
-
-    try:
-        bit_length = len(next(iter(counter1)))
-        if not all(len(k) == bit_length for k in counter1):
-             print("Warning: Keys in counter1 have inconsistent lengths.")
-             return None
-        if not all(len(k) == bit_length for k in counter2):
-             print("Warning: Keys in counter2 have inconsistent lengths.")
-             return None
-
-    except (StopIteration, TypeError):
-        return None # Handle empty counter or non-string keys
-
-    # Try flipping combinations of bit positions
-    # r=0 corresponds to no flips (identity transformation)
-    for r in range(bit_length + 1):
-        for positions in itertools.combinations(range(bit_length), r):
-            try:
-                # Apply the same bit flip to all keys in counter1
-                flipped_data = Counter({flip_multiple_bits(bstr, positions): val for bstr, val in counter1.items()})
-
-                # Check if the flipped counter matches counter2
-                if flipped_data == counter2:
-                    return positions # Return the positions that worked
-            except (IndexError, ValueError) as e:
-                 # Should not happen if length checks passed, but handle defensively
-                 print(f"Error during bit flip check with positions {positions}: {e}")
-                 continue # Try next combination
-
-    return None # No transformation found
-
-
-def check_transformations(data_list: List[List[Any]]) -> Tuple[List[Tuple[int, int, Tuple[int, ...]]], List[List[Any]]]:
-    """
-    Checks for bit-flip equivalence between pairs of Counters in a list.
-
-    Identifies pairs (i, j) where data_list[j][0] can be obtained from data_list[i][0]
-    by applying the same bit flips. Returns the transformations found and a list
-    of representatives that are not transformable into each other via bit flips.
-
-    Parameters:
-    -----------
-    data_list : List[List[Any]]
-        List of [Counter, ...] entries.
-
-    Returns:
-    --------
-    Tuple[List[Tuple[int, int, Tuple[int, ...]]], List[List[Any]]]
-        - List of transformations found: (index_i, index_j, flip_positions_tuple)
-        - List of non-transformable representatives (one from each equivalence class).
-    """
-    transformations: List[Tuple[int, int, Tuple[int, ...]]] = []
-    # Keep track of indices that are equivalent to an earlier index
-    equivalent_indices: Set[int] = set()
-    n_elements = len(data_list)
-
-    if n_elements < 2:
-        return [], data_list # No transformations possible with less than 2 elements
-
-    # Extract Counters for easier access
-    counters: List[Optional[CounterType[str]]] = []
-    for item in data_list:
-        if isinstance(item[0], Counter):
-            counters.append(item[0])
-        else:
-            counters.append(None) # Mark invalid entries
-
-    for i in range(n_elements):
-        if i in equivalent_indices or counters[i] is None:
-            continue # Skip if already marked as equivalent or invalid
-
-        for j in range(i + 1, n_elements):
-            if j in equivalent_indices or counters[j] is None:
-                continue
-
-            # Check if counter j can be transformed from counter i
-            bit_positions = find_transformation(counters[i], counters[j])
-            if bit_positions is not None:
-                transformations.append((i, j, bit_positions))
-                equivalent_indices.add(j) # Mark j as equivalent to i
-
-            # Also check the reverse transformation (i from j) - might be redundant if find_transformation is symmetric
-            # bit_positions_rev = find_transformation(counters[j], counters[i])
-            # if bit_positions_rev is not None:
-            #     # Found transformation, ensure j isn't already marked relative to something else
-            #     if j not in equivalent_indices:
-            #          transformations.append((j, i, bit_positions_rev)) # Record j->i
-            #          equivalent_indices.add(i) # Mark i as equivalent to j (if not already marked)
-            #     # Avoid marking both i and j if they are equivalent to each other
-
-
-    # Collect the representatives (those not marked as equivalent to an earlier one)
-    non_transformable_representatives = [data_list[k] for k in range(n_elements) if k not in equivalent_indices]
-
-    print(f"Found {len(transformations)} bit-flip transformations. Kept {len(non_transformable_representatives)} representatives.")
-    return transformations, non_transformable_representatives
-
-
-def check_tranf_full_data(grouped_data: Dict[Any, List[List[Any]]]) -> Dict[Any, List[List[Any]]]:
-    """
-    Applies `check_transformations` (bit-flip equivalence check) to each list
-    within a dictionary of grouped results.
-
-    Parameters:
-    -----------
-    grouped_data : Dict[Any, List[List[Any]]]
-         Dictionary where values are lists of [Counter, ...] entries.
-
-    Returns:
-    --------
-    Dict[Any, List[List[Any]]]
-        Dictionary with the same keys but values replaced by the list of
-        non-transformable representatives for each group.
-    """
-    final_representatives_dict: Dict[Any, List[List[Any]]] = {}
-    print("Applying bit-flip-based duplicate removal to grouped data...")
-    for key, data_list in grouped_data.items():
-        # print(f"Processing group {key} for bit-flip equivalence (Size: {len(data_list)})")
-        _, non_transformable_representatives = check_transformations(data_list)
-        final_representatives_dict[key] = non_transformable_representatives
-    print("Bit-flip-based filtering complete for all groups.")
-    return final_representatives_dict
-
-
-# --- Hadamard-based Equivalence ---
-
-def counter_to_state_vector(counter: CounterType[str], n_qubits: int) -> np.ndarray:
-    """
-    Converts a state Counter into a normalized NumPy state vector.
-
-    Assumes keys are binary strings representing computational basis states.
-    Coefficients in the Counter are treated as *counts* or *proportions*
-    and are converted to amplitudes (sqrt(probability)).
-
-    Parameters:
-    -----------
-    counter : CounterType[str]
-        Counter where keys are binary strings of length n_qubits, and values
-        are positive numbers representing counts or relative frequencies.
-    n_qubits : int
-        The number of qubits (length of the binary strings).
-
-    Returns:
-    --------
-    np.ndarray
-        A complex NumPy array of shape (2**n_qubits,) representing the
-        normalized quantum state vector.
-
-    Raises:
-    ------
-    ValueError: If keys have incorrect length, values are non-positive,
-                or n_qubits is non-positive.
-    """
-    if n_qubits <= 0:
-        raise ValueError("n_qubits must be positive.")
-    if not counter:
-        # Return zero vector if counter is empty
-        return np.zeros(2**n_qubits, dtype=complex)
-
-    total_counts = sum(counter.values())
-    if total_counts <= 0:
-        # Check if all values are non-positive
-        if all(v <= 0 for v in counter.values()):
-             print("Warning: All counts in counter are non-positive. Returning zero vector.")
-             return np.zeros(2**n_qubits, dtype=complex)
-        else:
-             raise ValueError("Sum of counts must be positive for normalization.")
-
-    state_vector = np.zeros(2**n_qubits, dtype=complex)
-
-    for bitstring, count in counter.items():
-        if len(bitstring) != n_qubits:
-            raise ValueError(f"Key '{bitstring}' has length {len(bitstring)}, expected {n_qubits}.")
-        if count < 0:
-            raise ValueError(f"Count for state '{bitstring}' is negative ({count}). Counts must be non-negative.")
-        if count == 0:
-             continue # Skip states with zero count
-
-        try:
-            index = int(bitstring, 2) # Convert binary string to integer index
-        except ValueError:
-            raise ValueError(f"Key '{bitstring}' is not a valid binary string.")
-
-        # Amplitude is sqrt(probability) = sqrt(count / total_counts)
-        amplitude = np.sqrt(count / total_counts)
-        state_vector[index] = amplitude # Assign amplitude (real in this case)
-
-    # Optional: Verify normalization (sum of squared amplitudes should be ~1)
-    # norm_sq = np.sum(np.abs(state_vector)**2)
-    # if not np.isclose(norm_sq, 1.0):
-    #     print(f"Warning: State vector normalization failed. Sum of squares = {norm_sq}")
-
-    return state_vector
-
-
-def apply_hadamard_to_qubits(n_qubits: int, hadamard_qubits: Sequence[int]) -> np.ndarray:
-    """
-    Constructs the matrix operator for applying Hadamard gates to a subset of qubits.
-
-    Creates a (2**n_qubits x 2**n_qubits) matrix representing H applied to
-    specified qubits and Identity (I) applied to others, using Kronecker products.
-
-    Parameters:
-    -----------
-    n_qubits : int
-        Total number of qubits in the system.
-    hadamard_qubits : Sequence[int]
-        A sequence (list, tuple) of 0-indexed qubit indices to apply Hadamard to.
-
-    Returns:
-    --------
-    np.ndarray
-        The (2**n_qubits, 2**n_qubits) complex NumPy array for the operator.
-
-    Raises:
-    ------
-    IndexError: If any index in hadamard_qubits is out of bounds.
-    """
-    if n_qubits <= 0:
-        raise ValueError("n_qubits must be positive.")
-
-    # Single qubit Hadamard gate
-    H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
-    # Single qubit Identity gate
-    I = np.eye(2, dtype=complex)
-
-    # Build the operator using Kronecker product
-    operator = np.array([[1.0]], dtype=complex) # Start with a 1x1 identity for kronecker product
-
-    for i in range(n_qubits):
-        if not 0 <= i < n_qubits:
-             # This check is redundant given the loop range, but good practice
-             raise IndexError(f"Internal error: Qubit index {i} out of bounds.")
-
-        # Choose H or I for the i-th qubit
-        single_qubit_op = H if i in hadamard_qubits else I
-
-        # Apply Kronecker product
-        # np.kron(A, B) reverses the standard tensor product order if thinking qubit 0 first
-        # To match standard convention (e.g., Qiskit), build from right-to-left or reverse indices.
-        # Let's stick to left-to-right for consistency with loop, assuming qubit 0 is leftmost.
-        operator = np.kron(operator, single_qubit_op)
-
-    return operator
-
-
-def get_unique_transformed_states_from_dict_v2(
-    data_dict: Dict[Any, List[List[Any]]]
-    ) -> Dict[Any, List[List[Any]]]:
-    """
-    Filters dictionary of state data, keeping only one representative for states
-    that are equivalent under local Hadamard transformations applied to subsets of qubits.
-
-    Compares state vectors derived from Counters.
-
-    Parameters:
-    -----------
-    data_dict : Dict[Any, List[List[Any]]]
-        Dictionary where values are lists of [Counter, ...] entries.
-
-    Returns:
-    --------
-    Dict[Any, List[List[Any]]]
-        Dictionary with the same keys but values filtered to keep only unique
-        representatives under local Hadamard equivalence.
-    """
-    print("Applying Hadamard-based equivalence filtering...")
-    all_original_states: List[Tuple[Any, int, np.ndarray, List[Any]]] = [] # (key, original_index, state_vector, original_data_entry)
-    key_order_map: Dict[Tuple[Any, int], int] = {} # Maps (key, original_index) to index in all_original_states
-
-    # 1. Convert all counters to state vectors and store them
-    current_global_index = 0
-    for key, data_list in data_dict.items():
-        for idx, entry in enumerate(data_list):
-            counter = entry[0]
-            if not isinstance(counter, Counter) or not counter:
-                print(f"Warning: Invalid counter for key '{key}', index {idx}. Skipping.")
-                continue
-            try:
-                n_qubits = len(next(iter(counter)))
-                state_vector = counter_to_state_vector(counter, n_qubits)
-                all_original_states.append((key, idx, state_vector, entry))
-                key_order_map[(key, idx)] = current_global_index
-                current_global_index += 1
-            except (StopIteration, ValueError, TypeError) as e:
-                print(f"Error converting counter to state vector for key '{key}', index {idx}: {e}. Skipping.")
-
-    n_total_states = len(all_original_states)
-    if n_total_states < 2:
-        print("Less than 2 valid states found, no Hadamard comparison needed.")
-        return data_dict # Return original if nothing to compare
-
-    # 2. Precompute all possible Hadamard transformations for each state
-    # Stores {global_index: [transformed_vector1, transformed_vector2, ...]}
-    transformed_state_cache: Dict[int, List[np.ndarray]] = defaultdict(list)
-    print(f"Precomputing Hadamard transformations for {n_total_states} states...")
-    for i in range(n_total_states):
-        _, _, state_vector_i, entry_i = all_original_states[i]
-        counter_i = entry_i[0]
-        try:
-             n_qubits_i = len(next(iter(counter_i)))
-             # Generate transformations by applying H to all non-empty subsets of qubits
-             transformed_state_cache[i].append(state_vector_i) # Include original vector
-             for k in range(1, n_qubits_i + 1):
-                 for qubit_indices in itertools.combinations(range(n_qubits_i), k):
-                     H_op = apply_hadamard_to_qubits(n_qubits_i, qubit_indices)
-                     transformed_vector = H_op @ state_vector_i # Apply operator
-                     transformed_state_cache[i].append(transformed_vector)
-        except Exception as e:
-             print(f"Error generating transformations for state index {i}: {e}")
-             # Cache will be incomplete for this index
-
-
-    # 3. Compare states: Check if state j is equivalent to any transformation of state i (where i < j)
-    equivalent_indices: Set[int] = set() # Stores global indices to remove
-    print("Comparing states for Hadamard equivalence...")
-    for i in range(n_total_states):
-        if i in equivalent_indices:
-            continue
-
-        # Get transformations of state i (if computed successfully)
-        transforms_i = transformed_state_cache.get(i, [])
-        if not transforms_i: continue # Skip if no transformations available
-
-        for j in range(i + 1, n_total_states):
-            if j in equivalent_indices:
-                continue
-
-            # Get original state vector j
-            _, _, state_vector_j, _ = all_original_states[j]
-
-            # Check if state_vector_j is close to any vector in transforms_i
-            is_equivalent = False
-            for transformed_i in transforms_i:
-                # Use np.allclose for comparing floating-point vectors
-                # Need to consider global phase: check if |<psi|phi>|^2 is close to 1
-                try:
-                     # Ensure vectors have the same shape
-                     if state_vector_j.shape == transformed_i.shape:
-                          inner_product = np.vdot(transformed_i, state_vector_j) # <transformed_i | state_j>
-                          overlap_sq = np.abs(inner_product)**2
-                          # Check if overlap squared is close to 1 (vectors are the same up to global phase)
-                          if np.allclose(overlap_sq, 1.0, atol=1e-8): # Adjust tolerance as needed
-                               is_equivalent = True
-                               break
-                except Exception as e_comp:
-                     print(f"Error comparing state {i} transformation with state {j}: {e_comp}")
-
-
-            if is_equivalent:
-                equivalent_indices.add(j) # Mark state j as equivalent to state i
-
-    # 4. Reconstruct the dictionary with only unique representatives
-    final_unique_data_dict: Dict[Any, List[List[Any]]] = defaultdict(list)
-    kept_count = 0
-    for i in range(n_total_states):
-        if i not in equivalent_indices:
-            key, _, _, original_entry = all_original_states[i]
-            final_unique_data_dict[key].append(original_entry)
-            kept_count += 1
-
-    print(f"Hadamard filtering complete. Kept {kept_count} unique representatives out of {n_total_states} initial states.")
-    # Convert defaultdict back to dict if necessary
-    return dict(final_unique_data_dict)
-
-
-# ==============================================================================
-# Section 4: State Query Functions (Optional)
-# ==============================================================================
-
-def check_quantum_states_exist(
-    result_dict: Dict[str, List[List[Any]]],
-    target_states: List[str],
-    hash_key: Optional[str] = None
-    ) -> List[Tuple[str, Dict[str, int], int]]:
-    """
-    Checks if all specified target quantum states (bit strings) exist within
-    the processed results, optionally within a specific hash group.
-
-    Parameters:
-    -----------
-    result_dict : Dict[str, List[List[Any]]]
-        The dictionary returned by `process_graph_dict` (or further filtering steps).
-        Values are lists of [Counter, matchings, graph, index].
-    target_states : List[str]
-        A list of binary strings representing the quantum states to search for.
-    hash_key : Optional[str], optional
-        If provided, search only within the group associated with this hash key.
-        If None (default), search across all groups.
-
-    Returns:
-    --------
-    List[Tuple[str, Dict[str, int], int]]
-        A list of tuples for each entry where all target states were found:
-        (hash_key, {state: coefficient, ...}, graph_original_index)
-    """
-    found_results: List[Tuple[str, Dict[str, int], int]] = []
-
-    if not target_states:
-        print("Warning: No target states provided for search.")
-        return []
-
+    results = []
+    
+    # Convert single state string to list for consistent processing
+    if isinstance(target_states, str):
+        target_states = [target_states]
+    
     # Determine which hash keys to search
-    search_keys = []
     if hash_key is not None:
-        if hash_key in result_dict:
-            search_keys = [hash_key]
-        else:
-            print(f"Warning: Specified hash_key '{hash_key}' not found in result_dict.")
-            return [] # Key not found
+        if hash_key not in result_dict:
+            return []
+        hash_keys = [hash_key]
     else:
-        search_keys = list(result_dict.keys())
-
-    # Search through the selected groups
-    for key in search_keys:
-        for state_data_entry in result_dict.get(key, []):
-            counter = state_data_entry[0]
-            original_graph_index = state_data_entry[3] # Index within the initial list for that group
-
-            if not isinstance(counter, Counter): continue # Skip invalid entries
-
-            # Check if all target states are present as keys in the counter
-            all_found = all(state in counter for state in target_states)
-
-            if all_found:
-                # Collect coefficients for the target states
+        hash_keys = result_dict.keys()
+    
+    # Search through each hash key
+    for key in hash_keys:
+        for state_data in result_dict[key]:
+            counter = state_data[0]  # State coefficient Counter
+            graph_index = state_data[3]  # Graph index
+            
+            # Check if all target states exist in this counter
+            all_states_exist = all(state in counter for state in target_states)
+            
+            if all_states_exist:
+                # Create dictionary of states and their coefficients
                 state_coefficients = {state: counter[state] for state in target_states}
-                found_results.append((key, state_coefficients, original_graph_index))
+                results.append((key, state_coefficients, graph_index))
+    
+    return results
 
-    return found_results
 
+# --- Import the apply_bit_flip function from the other file ---
+try:
+    from quantum_utils import apply_bit_flip
+except ImportError:
+    print("ERROR: Failed to import 'apply_bit_flip' from 'quantum_utils.py'.", file=sys.stderr)
+    # Optionally, terminate the program here or define a dummy function.
+    # Example: def apply_bit_flip(*args, **kwargs): raise RuntimeError("apply_bit_flip not loaded")
+    raise # Re-raise the error to stop the program
+
+# --- igraph import handling block (located here as check_quantum_states_with_bit_flips uses it) ---
+try:
+    import igraph as ig
+    IGRAPH_INSTALLED = True
+except ImportError:
+    class DummyGraph: pass # Dummy class to use if igraph is not installed
+    ig = type("igraph", (object,), {"Graph": DummyGraph})() # Create a mock igraph.Graph module/class
+    IGRAPH_INSTALLED = False
+    print("Warning: 'igraph' library not found. Graph object type checks might be skipped.", file=sys.stderr)
+
+# --- Define CounterType Alias (located here as check_quantum_states_with_bit_flips uses it) ---
+CounterType: TypeAlias = Counter
+
+
+ # This function assumes the necessary imports and definitions are present
+# in the same file (state_analyzer.py context from previous examples):
+# import sys, Counter, chain, combinations, List, Dict, Any, Optional, Union, Tuple, TypeAlias
+# from quantum_utils import apply_bit_flip (or fallback)
+# igraph import handling (ig, IGRAPH_INSTALLED, DummyGraph)
+# CounterType alias
 
 def check_quantum_states_with_bit_flips(
     result_dict: Dict[str, List[List[Any]]],
-    target_states: List[str],
+    target_states: Union[str, List[str]],
     bit_flip_positions: Optional[List[int]] = None,
-    hash_key: Optional[str] = None
-    ) -> List[Tuple[str, Dict[str, str], Dict[str, int], int, List[int]]]:
+    hash_key: Optional[str] = None,
+    exact_num_states: Optional[int] = None
+) -> List[Tuple[str, Any, int, CounterType[str], List[int], Dict[str, int]]]: # Return type uses Any for graph if igraph optional
     """
-    Checks if target quantum states exist in the results, considering potential
-    bit flips at specified positions (or all possible positions if None).
+    Checks if quantum states exist in Counters within result_dict,
+    considering possible bit flips at specified positions. Finds only the *first*
+    successful bit flip combination for each Counter entry.
+    Optionally filters based on the exact number of states in the Counter.
+    Includes enhanced checks for data structure and logs unexpected errors.
 
     Parameters:
     -----------
-    result_dict : Dict[str, List[List[Any]]]
-        The dictionary of processed results.
-    target_states : List[str]
-        List of original target binary strings.
-    bit_flip_positions : Optional[List[int]], optional
-        List of 0-indexed qubit positions where bit flips might occur.
-        If None (default), considers flips at all positions and combinations thereof.
-    hash_key : Optional[str], optional
-        If provided, search only within this hash group.
+    result_dict : dict
+        Result dictionary. Assumed structure:
+        {'hash': [[Counter_obj, data1, graph_obj, graph_idx], ...], ...}
+        **NOTE:** Assumes Counter at index 0, graph object at index 2,
+                 graph index (int) at index 3. Adjust indices constants if needed.
+    target_states : Union[str, List[str]]
+        Quantum state(s) to search for (e.g., '010' or ['010', '111']).
+    bit_flip_positions : Optional[List[int]], default=None
+        List of 0-based positions where bit flips are allowed.
+        If None, all combinations of flips across the longest target state's
+        length are tried (can be computationally expensive).
+    hash_key : Optional[str], default=None
+        Specific hash key to search within result_dict. If None, searches all keys.
+    exact_num_states : Optional[int], default=None
+        If provided, only inspects Counters having exactly this number of states.
 
     Returns:
     --------
-    List[Tuple[str, Dict[str, str], Dict[str, int], int, List[int]]]
-        List of results where states were found after applying bit flips:
-        (
-            hash_key,
-            {original_state: flipped_state_found_in_counter},
-            {flipped_state: coefficient},
-            graph_original_index,
-            list_of_bit_flip_positions_applied
-        )
+    List[Tuple[str, Any, int, CounterType[str], List[int], Dict[str, int]]]
+        List of tuples for successful matches (max one per input Counter entry):
+        (hash_key, graph_object, graph_index, original_counter,
+         applied_flips_list, found_flipped_states_with_coeffs_dict)
+        The type of graph_object depends on whether 'igraph' is installed and used.
+
+    Raises:
+    -------
+    TypeError
+        If `target_states` is not a string or list of strings, or if elements
+        within the list are not strings.
     """
-    found_results: List[Tuple[str, Dict[str, str], Dict[str, int], int, List[int]]] = []
+    results = []
 
-    if not target_states:
-        print("Warning: No target states provided for bit flip search.")
-        return []
+    # --- Input Processing: target_states ---
+    local_target_states: List[str] = []
+    if isinstance(target_states, str):
+        if target_states: local_target_states = [target_states]
+    elif isinstance(target_states, list):
+        if all(isinstance(s, str) for s in target_states):
+            local_target_states = [s for s in target_states if s] # Keep non-empty strings
+        else:
+            raise TypeError("If target_states is a list, all elements must be strings.")
+    else:
+        raise TypeError("target_states must be a string or a list of strings.")
 
-    # Determine hash keys to search
-    search_keys = []
+    if not local_target_states:
+         print("Warning: No valid non-empty target states provided to search for.", file=sys.stderr)
+         return []
+
+    # --- Input Processing: search_keys ---
+    search_keys: List[str] = []
     if hash_key is not None:
         if hash_key in result_dict:
             search_keys = [hash_key]
         else:
-            print(f"Warning: Specified hash_key '{hash_key}' not found.")
+            print(f"Warning: Specified hash_key '{hash_key}' not found in result_dict.", file=sys.stderr)
             return []
     else:
         search_keys = list(result_dict.keys())
-
-    # Determine bit length and positions to try flipping
-    try:
-        n_bits = len(target_states[0])
-        if not all(len(s) == n_bits for s in target_states):
-            raise ValueError("All target states must have the same length.")
-    except (IndexError, ValueError) as e:
-        print(f"Error determining bit length from target states: {e}")
+    if not search_keys:
+        print("Warning: No keys to search in result_dict.", file=sys.stderr)
         return []
 
+    # --- Input Processing: bit_flip_positions ---
+    actual_bit_flip_positions: List[int] = []
     if bit_flip_positions is None:
-        # If no specific positions provided, consider all positions
-        positions_to_try = list(range(n_bits))
+        try:
+            max_length = max(len(state) for state in local_target_states) if local_target_states else 0
+            if max_length > 0:
+                 actual_bit_flip_positions = list(range(max_length))
+        except ValueError:
+             print("Warning: Could not determine max length for default bit flips.", file=sys.stderr)
+             actual_bit_flip_positions = []
+    elif isinstance(bit_flip_positions, list):
+         valid_positions = [p for p in bit_flip_positions if isinstance(p, int) and p >= 0]
+         if len(valid_positions) != len(bit_flip_positions):
+             print("Warning: Some invalid values (non-integer or negative) removed from bit_flip_positions.", file=sys.stderr)
+         actual_bit_flip_positions = sorted(list(set(valid_positions))) # Unique, sorted, non-negative ints
     else:
-        # Validate provided positions
-        if not all(0 <= p < n_bits for p in bit_flip_positions):
-            print(f"Error: bit_flip_positions contains invalid indices for length {n_bits}.")
-            return []
-        positions_to_try = bit_flip_positions
+         print("Warning: Invalid type for bit_flip_positions. No bit flips will be considered.", file=sys.stderr)
+         actual_bit_flip_positions = [] # Ensure it's a list
 
-    # Generate all combinations of flips to apply (from 0 flips up to all specified positions)
-    all_flip_combinations: List[Tuple[int, ...]] = list(itertools.chain.from_iterable(
-        itertools.combinations(positions_to_try, r) for r in range(len(positions_to_try) + 1)
+    # --- Generate Bit Flip Combinations ---
+    all_combinations = list(chain.from_iterable(
+        combinations(actual_bit_flip_positions, r) for r in range(len(actual_bit_flip_positions) + 1)
     ))
+    if not all_combinations:
+        all_combinations = [()] # Represents the "no flip" case
 
-    # Search through each group and try each flip combination
+    # --- Define Indices (Constants for clarity) ---
+    COUNTER_IDX = 0
+    GRAPH_OBJ_IDX = 2
+    GRAPH_IDX_IDX = 3
+    MIN_DATA_LEN = max(COUNTER_IDX, GRAPH_OBJ_IDX, GRAPH_IDX_IDX) + 1
+
+    # --- Main Processing Loop ---
     for key in search_keys:
-        for state_data_entry in result_dict.get(key, []):
-            counter = state_data_entry[0]
-            original_graph_index = state_data_entry[3]
+        if key not in result_dict or not isinstance(result_dict[key], list):
+            print(f"Warning: Skipping key '{key}'. Missing or invalid data format (expected list).", file=sys.stderr)
+            continue
 
-            if not isinstance(counter, Counter): continue
+        for i, state_data in enumerate(result_dict[key]):
+            # --- Structure and Type Validation for each item ---
+            if not isinstance(state_data, (list, tuple)) or len(state_data) < MIN_DATA_LEN:
+                print(f"Warning: Skipping item {i} for key '{key}'. Invalid structure or length < {MIN_DATA_LEN}.", file=sys.stderr)
+                continue
 
-            for flip_combo in all_flip_combinations:
+            # Validate Counter
+            counter = state_data[COUNTER_IDX]
+            if not isinstance(counter, Counter):
+                print(f"Warning: Skipping item {i} for key '{key}'. Expected Counter at index {COUNTER_IDX}, found {type(counter).__name__}.", file=sys.stderr)
+                continue
+
+            # Validate Graph Object (conditionally if igraph installed)
+            graph_obj = state_data[GRAPH_OBJ_IDX]
+            if IGRAPH_INSTALLED and not isinstance(graph_obj, ig.Graph):
+                 print(f"Warning: Skipping item {i} for key '{key}'. Expected igraph.Graph at index {GRAPH_OBJ_IDX}, found {type(graph_obj).__name__}.", file=sys.stderr)
+                 continue
+
+            # Validate Graph Index
+            graph_idx = state_data[GRAPH_IDX_IDX]
+            if not isinstance(graph_idx, int):
+                 print(f"Warning: Skipping item {i} for key '{key}'. Expected int at index {GRAPH_IDX_IDX}, found {type(graph_idx).__name__}.", file=sys.stderr)
+                 continue
+
+            # --- Exact State Count Filter ---
+            if exact_num_states is not None and len(counter) != exact_num_states:
+                continue # Skip if the number of states doesn't match exactly
+
+            # --- Iterate through Bit Flip Combinations ---
+            # This inner loop will now stop for the current state_data
+            # as soon as the first valid flip combination is found.
+            for bit_positions_tuple in all_combinations:
+                bit_positions = list(bit_positions_tuple) # Use list version
+
                 try:
-                    # Apply the current flip combination to all target states
-                    flipped_targets_dict = {
-                        original: flip_multiple_bits(original, flip_combo)
-                        for original in target_states
-                    }
-                    flipped_target_states = list(flipped_targets_dict.values())
+                    # Apply flips to all target states for this combination
+                    flipped_targets = [apply_bit_flip(state, bit_positions) for state in local_target_states]
 
-                    # Check if *all* these flipped states exist in the current counter
-                    all_flipped_exist = all(flipped_state in counter for flipped_state in flipped_target_states)
+                    # Check if ALL flipped target states exist in the current counter
+                    all_states_exist = all(flipped_state in counter for flipped_state in flipped_targets)
 
-                    if all_flipped_exist:
-                        # Collect coefficients for the flipped states found
-                        state_coefficients = {fs: counter[fs] for fs in flipped_target_states}
-                        # Record the result
-                        found_results.append((
+                    if all_states_exist:
+                        # Retrieve coefficients for the found states
+                        state_coefficients = {state: counter[state] for state in flipped_targets}
+
+                        # Construct and append the result tuple
+                        result_tuple = (
                             key,
-                            flipped_targets_dict, # Map original -> flipped
-                            state_coefficients,  # Coefficients of flipped states
-                            original_graph_index,
-                            list(flip_combo)      # Positions flipped
-                        ))
-                        # Optimization: If found for one flip combo, maybe stop checking others for this entry?
-                        # Depends on whether multiple flip combos could lead to matches.
-                        # For now, continue checking all combos for completeness.
+                            graph_obj,
+                            graph_idx,
+                            counter,
+                            bit_positions, # List of positions flipped for this match
+                            state_coefficients
+                        )
+                        results.append(result_tuple)
 
-                except (IndexError, ValueError) as e_flip:
-                    print(f"Error applying bit flips {flip_combo} to target states: {e_flip}")
-                    # Skip this flip combination
+                        # --- BREAK ADDED ---
+                        # Stop searching for other flip combinations for THIS state_data item
+                        # once the first successful one is found.
+                        break
+                        # --- END OF ADDED BREAK ---
+
+                except Exception as e:
+                    # Catch unexpected errors during flip application or check
+                    print(f"Warning: Unexpected error during processing for key '{key}', item {i}, flips {bit_positions}: {e}. Skipping this combination.", file=sys.stderr)
+                    # Continue to the next flip combination even if one fails
                     continue
 
-    return found_results
+            # End of loop for bit_positions_tuple for the current state_data
+        # End of loop for state_data in result_dict[key]
+    # End of loop for key in search_keys
 
+    return results
 
-def get_all_quantum_states(
-    result_dict: Dict[str, List[List[Any]]],
-    hash_key: Optional[str] = None
-    ) -> Dict[str, Dict[str, List[Tuple[int, int]]]]:
+def filter_by_state_count(result_dict, min_states=None, max_states=None, exact_states=None, hash_key=None):
     """
-    Extracts all unique quantum states (bit strings) found in the results,
-    along with their coefficients and the original graph index where they appeared.
-
+    Filter results to include only those with a specific number of quantum states.
+    
     Parameters:
     -----------
-    result_dict : Dict[str, List[List[Any]]]
-        The dictionary of processed results.
-    hash_key : Optional[str], optional
-        If provided, extract states only from this hash group.
-
+    result_dict : dict
+        Result dictionary from process_graph_dict()
+    min_states : int, optional
+        Minimum number of states required (default: None)
+    max_states : int, optional
+        Maximum number of states allowed (default: None)
+    exact_states : int, optional
+        Exact number of states required (default: None)
+    hash_key : str, optional
+        Specific hash key to filter within (default: None, filter all hashes)
+        
     Returns:
     --------
-    Dict[str, Dict[str, List[Tuple[int, int]]]]
-        A dictionary mapping:
-        hash_key -> { state_string: [(coefficient, graph_original_index), ...], ... }
+    dict
+        Filtered results dictionary with the same structure as the input
     """
-    all_states_found: Dict[str, Dict[str, List[Tuple[int, int]]]] = defaultdict(lambda: defaultdict(list))
-
+    filtered_results = {}
+    
     # Determine which hash keys to process
-    search_keys = []
     if hash_key is not None:
-        if hash_key in result_dict:
-            search_keys = [hash_key]
-        else:
-            print(f"Warning: Specified hash_key '{hash_key}' not found.")
+        if hash_key not in result_dict:
             return {}
+        hash_keys = [hash_key]
     else:
-        search_keys = list(result_dict.keys())
+        hash_keys = result_dict.keys()
+    
+    # Process each hash key
+    for key in hash_keys:
+        filtered_list = []
+        
+        for state_data in result_dict[key]:
+            counter = state_data[0]  # State coefficient Counter
+            num_states = len(counter)
+            
+            # Check if number of states meets the criteria
+            matches = True
+            if exact_states is not None:
+                matches = (num_states == exact_states)
+            else:
+                if min_states is not None and num_states < min_states:
+                    matches = False
+                if max_states is not None and num_states > max_states:
+                    matches = False
+            
+            # Add to filtered results if it matches
+            if matches:
+                filtered_list.append(state_data)
+        
+        # Only add to results if there are filtered items
+        if filtered_list:
+            filtered_results[key] = filtered_list
+    
+    return filtered_results
 
-    # Iterate through the selected groups and entries
-    for key in search_keys:
-        for state_data_entry in result_dict.get(key, []):
-            counter = state_data_entry[0]
-            original_graph_index = state_data_entry[3]
+# def get_all_quantum_states(
+#     result_dict: Dict[str, List[List[Any]]],
+#     hash_key: Optional[str] = None
+#     ) -> Dict[str, Dict[str, List[Tuple[int, int]]]]:
+#     """
+#     Extracts all unique quantum states (bit strings) found in the results,
+#     along with their coefficients and the original graph index where they appeared.
 
-            if not isinstance(counter, Counter): continue
+#     Parameters:
+#     -----------
+#     result_dict : Dict[str, List[List[Any]]]
+#         The dictionary of processed results.
+#     hash_key : Optional[str], optional
+#         If provided, extract states only from this hash group.
 
-            # Add each state and its info to the result dictionary
-            for state, coefficient in counter.items():
-                all_states_found[key][state].append((coefficient, original_graph_index))
+#     Returns:
+#     --------
+#     Dict[str, Dict[str, List[Tuple[int, int]]]]
+#         A dictionary mapping:
+#         hash_key -> { state_string: [(coefficient, graph_original_index), ...], ... }
+#     """
+#     all_states_found: Dict[str, Dict[str, List[Tuple[int, int]]]] = defaultdict(lambda: defaultdict(list))
 
-    # Convert defaultdicts back to regular dicts for the final output
-    final_dict = {k: dict(v) for k, v in all_states_found.items()}
-    return final_dict
+#     # Determine which hash keys to process
+#     search_keys = []
+#     if hash_key is not None:
+#         if hash_key in result_dict:
+#             search_keys = [hash_key]
+#         else:
+#             print(f"Warning: Specified hash_key '{hash_key}' not found.")
+#             return {}
+#     else:
+#         search_keys = list(result_dict.keys())
+
+#     # Iterate through the selected groups and entries
+#     for key in search_keys:
+#         for state_data_entry in result_dict.get(key, []):
+#             counter = state_data_entry[0]
+#             original_graph_index = state_data_entry[3]
+
+#             if not isinstance(counter, Counter): continue
+
+#             # Add each state and its info to the result dictionary
+#             for state, coefficient in counter.items():
+#                 all_states_found[key][state].append((coefficient, original_graph_index))
+
+#     # Convert defaultdicts back to regular dicts for the final output
+#     final_dict = {k: dict(v) for k, v in all_states_found.items()}
+#     return final_dict
 
 
-# ==============================================================================
-# (Optional) Further processing or utility functions can be added below
-# ==============================================================================
+# # ==============================================================================
+# # Section 4: Quantum State Equivalence Checking and Filtering Functions
+# # ==============================================================================
 
-# Example: Function to group results by coefficient structure (already used internally in some filtering)
-def gen_grouped_counters(unique_counters_list: List[List[Any]]) -> Dict[Tuple[int, ...], List[List[Any]]]:
-    """Groups [Counter, ...] entries by the sorted tuple of their Counter values."""
-    grouped_counters: Dict[Tuple[int, ...], List[List[Any]]] = defaultdict(list)
-    for entry in unique_counters_list:
-        counter = entry[0]
-        if isinstance(counter, Counter):
-            # Create a key based on sorted counts (coefficients)
-            value_tuple = tuple(sorted(counter.values()))
-            grouped_counters[value_tuple].append(entry)
-        else:
-            print("Warning: Invalid entry format in gen_grouped_counters.")
-    return dict(grouped_counters)
+# # --- Permutation-based Equivalence ---
+
+# def apply_permutation_to_keys(counter: CounterType[str], permutation: Sequence[int]) -> CounterType[str]:
+#     """
+#     Applies a permutation to the keys (bit strings) of a Counter.
+
+#     Example: counter={'010': 5}, permutation=(1, 0, 2) -> returns {'100': 5}
+
+#     Parameters:
+#     -----------
+#     counter : CounterType[str]
+#         The input Counter where keys are bit strings of the same length.
+#     permutation : Sequence[int]
+#         A sequence (e.g., tuple) representing the new order of indices.
+#         Example: (1, 0, 2) means the bit at index 1 comes first, then index 0, then index 2.
+
+#     Returns:
+#     --------
+#     CounterType[str]
+#         A new Counter with permuted keys.
+
+#     Raises:
+#     ------
+#     ValueError:
+#         If the permutation length doesn't match the key length or if keys have varying lengths.
+#     IndexError:
+#         If permutation contains invalid indices.
+#     """
+#     transformed_counter: CounterType[str] = Counter()
+#     key_length = -1
+
+#     if not counter:
+#         return transformed_counter # Return empty counter if input is empty
+
+#     for key, value in counter.items():
+#         if key_length == -1:
+#             key_length = len(key)
+#             # Check permutation validity once
+#             if len(permutation) != key_length:
+#                 raise ValueError(f"Permutation length {len(permutation)} must match key length {key_length}.")
+#             if not all(0 <= i < key_length for i in permutation):
+#                  raise IndexError("Permutation contains invalid indices.")
+#             if len(set(permutation)) != key_length:
+#                  raise ValueError("Permutation must contain unique indices.")
+
+#         elif len(key) != key_length:
+#             raise ValueError("All keys in the Counter must have the same length.")
+
+#         # Apply permutation
+#         try:
+#             new_key_list = [key[i] for i in permutation]
+#             new_key = ''.join(new_key_list)
+#             transformed_counter[new_key] = value
+#         except IndexError:
+#             # This should theoretically not happen if initial checks pass
+#             raise IndexError(f"Error applying permutation {permutation} to key {key}. Invalid index.")
+
+#     return transformed_counter
+
+
+# def remove_duplicate_counters(data_list: List[List[Any]]) -> List[List[Any]]:
+#     """
+#     Removes duplicate entries from a list based on permutation equivalence of their state Counters.
+
+#     Compares each Counter with others, applying all possible permutations to the keys.
+#     Keeps only one representative for each permutation equivalence class.
+
+#     Parameters:
+#     -----------
+#     data_list : List[List[Any]]
+#         A list where each inner list is expected to have a Counter object
+#         at index 0 (e.g., [Counter, matchings, graph, index]).
+
+#     Returns:
+#     --------
+#     List[List[Any]]
+#         A filtered list containing only entries with unique Counters up to key permutation.
+#     """
+#     if not data_list:
+#         return []
+
+#     indices_to_remove: Set[int] = set()
+#     n_elements = len(data_list)
+#     unique_representatives: List[List[Any]] = [] # Stores the first encountered representative
+
+#     # Pre-calculate permutations if all counters have the same key length
+#     first_counter = data_list[0][0]
+#     if not isinstance(first_counter, Counter) or not first_counter:
+#          print("Warning: First element's counter is invalid or empty in remove_duplicate_counters. Cannot determine permutations.")
+#          # Fallback or error handling needed - let's assume valid for now
+#          # Or iterate and determine per counter comparison if lengths vary (less efficient)
+#          return data_list # Return original if cannot proceed safely
+
+#     try:
+#         n_bits = len(next(iter(first_counter))) # Get length from first key of first counter
+#         all_permutations = list(itertools.permutations(range(n_bits)))
+#     except (StopIteration, TypeError):
+#         print("Warning: Could not determine key length from first counter. Skipping permutation check.")
+#         return data_list # Return original if cannot proceed safely
+
+
+#     for i in range(n_elements):
+#         if i in indices_to_remove:
+#             continue # Skip if already marked for removal
+
+#         # Add the current element as a potential unique representative
+#         unique_representatives.append(data_list[i])
+#         counter1 = data_list[i][0]
+#         if not isinstance(counter1, Counter): continue # Skip invalid entries
+
+#         # Check against subsequent elements
+#         for j in range(i + 1, n_elements):
+#             if j in indices_to_remove:
+#                 continue
+
+#             counter2 = data_list[j][0]
+#             if not isinstance(counter2, Counter): continue
+
+#             # Basic check: must have same number of states and same coefficients (values)
+#             if len(counter1) != len(counter2) or sorted(counter1.values()) != sorted(counter2.values()):
+#                 continue
+
+#             # Check if counter2 is a permutation of counter1
+#             is_permutation_equivalent = False
+#             try:
+#                 # Optimization: Check if key lengths match before permutations
+#                 len1 = len(next(iter(counter1))) if counter1 else -1
+#                 len2 = len(next(iter(counter2))) if counter2 else -1
+#                 if len1 != len2 or len1 == -1:
+#                      continue # Cannot be permutation equivalent if lengths differ or empty
+
+#                 # Check against all permutations of counter1
+#                 for p in all_permutations:
+#                     transformed_counter1 = apply_permutation_to_keys(counter1, p)
+#                     if transformed_counter1 == counter2:
+#                         is_permutation_equivalent = True
+#                         break # Found equivalence
+#             except Exception as e:
+#                  print(f"Warning: Error during permutation check between index {i} and {j}: {e}. Assuming not equivalent.")
+
+#             if is_permutation_equivalent:
+#                 indices_to_remove.add(j) # Mark j for removal
+
+#     # Filter the original list based on indices not marked for removal
+#     final_unique_list = [data_list[k] for k in range(n_elements) if k not in indices_to_remove]
+
+#     print(f"Removed {len(indices_to_remove)} entries based on key permutation equivalence. Kept {len(final_unique_list)}.")
+#     return final_unique_list
+
+
+# def remove_duplicate_counters_full_list(grouped_counters: Dict[Any, List[List[Any]]]) -> Dict[Any, List[List[Any]]]:
+#     """
+#     Applies `remove_duplicate_counters` to each list within a dictionary of grouped results.
+
+#     Parameters:
+#     -----------
+#     grouped_counters : Dict[Any, List[List[Any]]]
+#          A dictionary where keys might represent groups (e.g., by coefficient counts)
+#          and values are lists of [Counter, ...] entries.
+
+#     Returns:
+#     --------
+#     Dict[Any, List[List[Any]]]
+#         A dictionary with the same keys but with filtered lists as values.
+#     """
+#     save_filtered_data: Dict[Any, List[List[Any]]] = {}
+#     print("Applying permutation-based duplicate removal to grouped counters...")
+#     for key, data_list in grouped_counters.items():
+#         # print(f"Processing group with key: {key} (Size: {len(data_list)})")
+#         filtered_list = remove_duplicate_counters(data_list)
+#         save_filtered_data[key] = filtered_list
+#     print("Permutation-based filtering complete for all groups.")
+#     return save_filtered_data
+
+# # --- Bit-Flip-based Equivalence ---
+
+
+# def flip_multiple_bits(binary_str: str, positions: Iterable[int]) -> str:
+#     """
+#     Flips bits at multiple specified positions in a binary string.
+
+#     Parameters:
+#     -----------
+#     binary_str : str
+#         The input binary string.
+#     positions : Iterable[int]
+#         An iterable (e.g., list, tuple) of 0-indexed positions to flip.
+
+#     Returns:
+#     --------
+#     str
+#         The binary string with bits flipped at the specified positions.
+#     """
+#     bit_list = list(binary_str)
+#     str_len = len(binary_str)
+#     for pos in positions:
+#         if not 0 <= pos < str_len:
+#             raise IndexError(f"Position {pos} is out of bounds for string of length {str_len}.")
+#         if bit_list[pos] == '0':
+#             bit_list[pos] = '1'
+#         elif bit_list[pos] == '1':
+#             bit_list[pos] = '0'
+#         else:
+#             raise ValueError(f"Character at index {pos} is '{bit_list[pos]}', not '0' or '1'.")
+#     return ''.join(bit_list)
+
+
+# def find_transformation(counter1: CounterType[str], counter2: CounterType[str]) -> Optional[Tuple[int, ...]]:
+#     """
+#     Checks if counter2 can be obtained from counter1 by flipping the same set of bits
+#     in all keys of counter1.
+
+#     Parameters:
+#     -----------
+#     counter1 : CounterType[str]
+#         The starting Counter.
+#     counter2 : CounterType[str]
+#         The target Counter.
+
+#     Returns:
+#     --------
+#     Optional[Tuple[int, ...]]
+#         A tuple containing the 0-indexed positions of the bits that need to be flipped
+#         to transform counter1 to counter2. Returns None if no such transformation exists
+#         or if counters are incompatible (different sizes, different values, empty, etc.).
+#     """
+#     if len(counter1) != len(counter2) or not counter1:
+#         return None # Cannot transform if sizes differ or empty
+#     if sorted(counter1.values()) != sorted(counter2.values()):
+#         return None # Coefficients must match
+
+#     try:
+#         bit_length = len(next(iter(counter1)))
+#         if not all(len(k) == bit_length for k in counter1):
+#              print("Warning: Keys in counter1 have inconsistent lengths.")
+#              return None
+#         if not all(len(k) == bit_length for k in counter2):
+#              print("Warning: Keys in counter2 have inconsistent lengths.")
+#              return None
+
+#     except (StopIteration, TypeError):
+#         return None # Handle empty counter or non-string keys
+
+#     # Try flipping combinations of bit positions
+#     # r=0 corresponds to no flips (identity transformation)
+#     for r in range(bit_length + 1):
+#         for positions in itertools.combinations(range(bit_length), r):
+#             try:
+#                 # Apply the same bit flip to all keys in counter1
+#                 flipped_data = Counter({flip_multiple_bits(bstr, positions): val for bstr, val in counter1.items()})
+
+#                 # Check if the flipped counter matches counter2
+#                 if flipped_data == counter2:
+#                     return positions # Return the positions that worked
+#             except (IndexError, ValueError) as e:
+#                  # Should not happen if length checks passed, but handle defensively
+#                  print(f"Error during bit flip check with positions {positions}: {e}")
+#                  continue # Try next combination
+
+#     return None # No transformation found
+
+
+# def check_transformations(data_list: List[List[Any]]) -> Tuple[List[Tuple[int, int, Tuple[int, ...]]], List[List[Any]]]:
+#     """
+#     Checks for bit-flip equivalence between pairs of Counters in a list.
+
+#     Identifies pairs (i, j) where data_list[j][0] can be obtained from data_list[i][0]
+#     by applying the same bit flips. Returns the transformations found and a list
+#     of representatives that are not transformable into each other via bit flips.
+
+#     Parameters:
+#     -----------
+#     data_list : List[List[Any]]
+#         List of [Counter, ...] entries.
+
+#     Returns:
+#     --------
+#     Tuple[List[Tuple[int, int, Tuple[int, ...]]], List[List[Any]]]
+#         - List of transformations found: (index_i, index_j, flip_positions_tuple)
+#         - List of non-transformable representatives (one from each equivalence class).
+#     """
+#     transformations: List[Tuple[int, int, Tuple[int, ...]]] = []
+#     # Keep track of indices that are equivalent to an earlier index
+#     equivalent_indices: Set[int] = set()
+#     n_elements = len(data_list)
+
+#     if n_elements < 2:
+#         return [], data_list # No transformations possible with less than 2 elements
+
+#     # Extract Counters for easier access
+#     counters: List[Optional[CounterType[str]]] = []
+#     for item in data_list:
+#         if isinstance(item[0], Counter):
+#             counters.append(item[0])
+#         else:
+#             counters.append(None) # Mark invalid entries
+
+#     for i in range(n_elements):
+#         if i in equivalent_indices or counters[i] is None:
+#             continue # Skip if already marked as equivalent or invalid
+
+#         for j in range(i + 1, n_elements):
+#             if j in equivalent_indices or counters[j] is None:
+#                 continue
+
+#             # Check if counter j can be transformed from counter i
+#             bit_positions = find_transformation(counters[i], counters[j])
+#             if bit_positions is not None:
+#                 transformations.append((i, j, bit_positions))
+#                 equivalent_indices.add(j) # Mark j as equivalent to i
+
+#             # Also check the reverse transformation (i from j) - might be redundant if find_transformation is symmetric
+#             # bit_positions_rev = find_transformation(counters[j], counters[i])
+#             # if bit_positions_rev is not None:
+#             #     # Found transformation, ensure j isn't already marked relative to something else
+#             #     if j not in equivalent_indices:
+#             #          transformations.append((j, i, bit_positions_rev)) # Record j->i
+#             #          equivalent_indices.add(i) # Mark i as equivalent to j (if not already marked)
+#             #     # Avoid marking both i and j if they are equivalent to each other
+
+
+#     # Collect the representatives (those not marked as equivalent to an earlier one)
+#     non_transformable_representatives = [data_list[k] for k in range(n_elements) if k not in equivalent_indices]
+
+#     print(f"Found {len(transformations)} bit-flip transformations. Kept {len(non_transformable_representatives)} representatives.")
+#     return transformations, non_transformable_representatives
+
+
+# def check_tranf_full_data(grouped_data: Dict[Any, List[List[Any]]]) -> Dict[Any, List[List[Any]]]:
+#     """
+#     Applies `check_transformations` (bit-flip equivalence check) to each list
+#     within a dictionary of grouped results.
+
+#     Parameters:
+#     -----------
+#     grouped_data : Dict[Any, List[List[Any]]]
+#          Dictionary where values are lists of [Counter, ...] entries.
+
+#     Returns:
+#     --------
+#     Dict[Any, List[List[Any]]]
+#         Dictionary with the same keys but values replaced by the list of
+#         non-transformable representatives for each group.
+#     """
+#     final_representatives_dict: Dict[Any, List[List[Any]]] = {}
+#     print("Applying bit-flip-based duplicate removal to grouped data...")
+#     for key, data_list in grouped_data.items():
+#         # print(f"Processing group {key} for bit-flip equivalence (Size: {len(data_list)})")
+#         _, non_transformable_representatives = check_transformations(data_list)
+#         final_representatives_dict[key] = non_transformable_representatives
+#     print("Bit-flip-based filtering complete for all groups.")
+#     return final_representatives_dict
+
+
+# # --- Hadamard-based Equivalence ---
+
+# def counter_to_state_vector(counter: CounterType[str], n_qubits: int) -> np.ndarray:
+#     """
+#     Converts a state Counter into a normalized NumPy state vector.
+
+#     Assumes keys are binary strings representing computational basis states.
+#     Coefficients in the Counter are treated as *counts* or *proportions*
+#     and are converted to amplitudes (sqrt(probability)).
+
+#     Parameters:
+#     -----------
+#     counter : CounterType[str]
+#         Counter where keys are binary strings of length n_qubits, and values
+#         are positive numbers representing counts or relative frequencies.
+#     n_qubits : int
+#         The number of qubits (length of the binary strings).
+
+#     Returns:
+#     --------
+#     np.ndarray
+#         A complex NumPy array of shape (2**n_qubits,) representing the
+#         normalized quantum state vector.
+
+#     Raises:
+#     ------
+#     ValueError: If keys have incorrect length, values are non-positive,
+#                 or n_qubits is non-positive.
+#     """
+#     if n_qubits <= 0:
+#         raise ValueError("n_qubits must be positive.")
+#     if not counter:
+#         # Return zero vector if counter is empty
+#         return np.zeros(2**n_qubits, dtype=complex)
+
+#     total_counts = sum(counter.values())
+#     if total_counts <= 0:
+#         # Check if all values are non-positive
+#         if all(v <= 0 for v in counter.values()):
+#              print("Warning: All counts in counter are non-positive. Returning zero vector.")
+#              return np.zeros(2**n_qubits, dtype=complex)
+#         else:
+#              raise ValueError("Sum of counts must be positive for normalization.")
+
+#     state_vector = np.zeros(2**n_qubits, dtype=complex)
+
+#     for bitstring, count in counter.items():
+#         if len(bitstring) != n_qubits:
+#             raise ValueError(f"Key '{bitstring}' has length {len(bitstring)}, expected {n_qubits}.")
+#         if count < 0:
+#             raise ValueError(f"Count for state '{bitstring}' is negative ({count}). Counts must be non-negative.")
+#         if count == 0:
+#              continue # Skip states with zero count
+
+#         try:
+#             index = int(bitstring, 2) # Convert binary string to integer index
+#         except ValueError:
+#             raise ValueError(f"Key '{bitstring}' is not a valid binary string.")
+
+#         # Amplitude is sqrt(probability) = sqrt(count / total_counts)
+#         amplitude = np.sqrt(count / total_counts)
+#         state_vector[index] = amplitude # Assign amplitude (real in this case)
+
+#     # Optional: Verify normalization (sum of squared amplitudes should be ~1)
+#     # norm_sq = np.sum(np.abs(state_vector)**2)
+#     # if not np.isclose(norm_sq, 1.0):
+#     #     print(f"Warning: State vector normalization failed. Sum of squares = {norm_sq}")
+
+#     return state_vector
+
+
+# def apply_hadamard_to_qubits(n_qubits: int, hadamard_qubits: Sequence[int]) -> np.ndarray:
+#     """
+#     Constructs the matrix operator for applying Hadamard gates to a subset of qubits.
+
+#     Creates a (2**n_qubits x 2**n_qubits) matrix representing H applied to
+#     specified qubits and Identity (I) applied to others, using Kronecker products.
+
+#     Parameters:
+#     -----------
+#     n_qubits : int
+#         Total number of qubits in the system.
+#     hadamard_qubits : Sequence[int]
+#         A sequence (list, tuple) of 0-indexed qubit indices to apply Hadamard to.
+
+#     Returns:
+#     --------
+#     np.ndarray
+#         The (2**n_qubits, 2**n_qubits) complex NumPy array for the operator.
+
+#     Raises:
+#     ------
+#     IndexError: If any index in hadamard_qubits is out of bounds.
+#     """
+#     if n_qubits <= 0:
+#         raise ValueError("n_qubits must be positive.")
+
+#     # Single qubit Hadamard gate
+#     H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+#     # Single qubit Identity gate
+#     I = np.eye(2, dtype=complex)
+
+#     # Build the operator using Kronecker product
+#     operator = np.array([[1.0]], dtype=complex) # Start with a 1x1 identity for kronecker product
+
+#     for i in range(n_qubits):
+#         if not 0 <= i < n_qubits:
+#              # This check is redundant given the loop range, but good practice
+#              raise IndexError(f"Internal error: Qubit index {i} out of bounds.")
+
+#         # Choose H or I for the i-th qubit
+#         single_qubit_op = H if i in hadamard_qubits else I
+
+#         # Apply Kronecker product
+#         # np.kron(A, B) reverses the standard tensor product order if thinking qubit 0 first
+#         # To match standard convention (e.g., Qiskit), build from right-to-left or reverse indices.
+#         # Let's stick to left-to-right for consistency with loop, assuming qubit 0 is leftmost.
+#         operator = np.kron(operator, single_qubit_op)
+
+#     return operator
+
+
+# def get_unique_transformed_states_from_dict_v2(
+#     data_dict: Dict[Any, List[List[Any]]]
+#     ) -> Dict[Any, List[List[Any]]]:
+#     """
+#     Filters dictionary of state data, keeping only one representative for states
+#     that are equivalent under local Hadamard transformations applied to subsets of qubits.
+
+#     Compares state vectors derived from Counters.
+
+#     Parameters:
+#     -----------
+#     data_dict : Dict[Any, List[List[Any]]]
+#         Dictionary where values are lists of [Counter, ...] entries.
+
+#     Returns:
+#     --------
+#     Dict[Any, List[List[Any]]]
+#         Dictionary with the same keys but values filtered to keep only unique
+#         representatives under local Hadamard equivalence.
+#     """
+#     print("Applying Hadamard-based equivalence filtering...")
+#     all_original_states: List[Tuple[Any, int, np.ndarray, List[Any]]] = [] # (key, original_index, state_vector, original_data_entry)
+#     key_order_map: Dict[Tuple[Any, int], int] = {} # Maps (key, original_index) to index in all_original_states
+
+#     # 1. Convert all counters to state vectors and store them
+#     current_global_index = 0
+#     for key, data_list in data_dict.items():
+#         for idx, entry in enumerate(data_list):
+#             counter = entry[0]
+#             if not isinstance(counter, Counter) or not counter:
+#                 print(f"Warning: Invalid counter for key '{key}', index {idx}. Skipping.")
+#                 continue
+#             try:
+#                 n_qubits = len(next(iter(counter)))
+#                 state_vector = counter_to_state_vector(counter, n_qubits)
+#                 all_original_states.append((key, idx, state_vector, entry))
+#                 key_order_map[(key, idx)] = current_global_index
+#                 current_global_index += 1
+#             except (StopIteration, ValueError, TypeError) as e:
+#                 print(f"Error converting counter to state vector for key '{key}', index {idx}: {e}. Skipping.")
+
+#     n_total_states = len(all_original_states)
+#     if n_total_states < 2:
+#         print("Less than 2 valid states found, no Hadamard comparison needed.")
+#         return data_dict # Return original if nothing to compare
+
+#     # 2. Precompute all possible Hadamard transformations for each state
+#     # Stores {global_index: [transformed_vector1, transformed_vector2, ...]}
+#     transformed_state_cache: Dict[int, List[np.ndarray]] = defaultdict(list)
+#     print(f"Precomputing Hadamard transformations for {n_total_states} states...")
+#     for i in range(n_total_states):
+#         _, _, state_vector_i, entry_i = all_original_states[i]
+#         counter_i = entry_i[0]
+#         try:
+#              n_qubits_i = len(next(iter(counter_i)))
+#              # Generate transformations by applying H to all non-empty subsets of qubits
+#              transformed_state_cache[i].append(state_vector_i) # Include original vector
+#              for k in range(1, n_qubits_i + 1):
+#                  for qubit_indices in itertools.combinations(range(n_qubits_i), k):
+#                      H_op = apply_hadamard_to_qubits(n_qubits_i, qubit_indices)
+#                      transformed_vector = H_op @ state_vector_i # Apply operator
+#                      transformed_state_cache[i].append(transformed_vector)
+#         except Exception as e:
+#              print(f"Error generating transformations for state index {i}: {e}")
+#              # Cache will be incomplete for this index
+
+
+#     # 3. Compare states: Check if state j is equivalent to any transformation of state i (where i < j)
+#     equivalent_indices: Set[int] = set() # Stores global indices to remove
+#     print("Comparing states for Hadamard equivalence...")
+#     for i in range(n_total_states):
+#         if i in equivalent_indices:
+#             continue
+
+#         # Get transformations of state i (if computed successfully)
+#         transforms_i = transformed_state_cache.get(i, [])
+#         if not transforms_i: continue # Skip if no transformations available
+
+#         for j in range(i + 1, n_total_states):
+#             if j in equivalent_indices:
+#                 continue
+
+#             # Get original state vector j
+#             _, _, state_vector_j, _ = all_original_states[j]
+
+#             # Check if state_vector_j is close to any vector in transforms_i
+#             is_equivalent = False
+#             for transformed_i in transforms_i:
+#                 # Use np.allclose for comparing floating-point vectors
+#                 # Need to consider global phase: check if |<psi|phi>|^2 is close to 1
+#                 try:
+#                      # Ensure vectors have the same shape
+#                      if state_vector_j.shape == transformed_i.shape:
+#                           inner_product = np.vdot(transformed_i, state_vector_j) # <transformed_i | state_j>
+#                           overlap_sq = np.abs(inner_product)**2
+#                           # Check if overlap squared is close to 1 (vectors are the same up to global phase)
+#                           if np.allclose(overlap_sq, 1.0, atol=1e-8): # Adjust tolerance as needed
+#                                is_equivalent = True
+#                                break
+#                 except Exception as e_comp:
+#                      print(f"Error comparing state {i} transformation with state {j}: {e_comp}")
+
+
+#             if is_equivalent:
+#                 equivalent_indices.add(j) # Mark state j as equivalent to state i
+
+#     # 4. Reconstruct the dictionary with only unique representatives
+#     final_unique_data_dict: Dict[Any, List[List[Any]]] = defaultdict(list)
+#     kept_count = 0
+#     for i in range(n_total_states):
+#         if i not in equivalent_indices:
+#             key, _, _, original_entry = all_original_states[i]
+#             final_unique_data_dict[key].append(original_entry)
+#             kept_count += 1
+
+#     print(f"Hadamard filtering complete. Kept {kept_count} unique representatives out of {n_total_states} initial states.")
+#     # Convert defaultdict back to dict if necessary
+#     return dict(final_unique_data_dict)
+
+
+
 

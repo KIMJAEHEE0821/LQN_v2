@@ -15,7 +15,7 @@ from typing import Dict, List, Any
 # --- Import the main pipeline function ---
 try:
     # Assuming the pipeline logic is in pipeline.py
-    from pipeline import epm_pipeline
+    from improved_code_using_gemini.pipeline import epm_pipeline
 except ImportError as e:
     print(f"Error importing the 'epm_pipeline' function from pipeline.py: {e}")
     print("Ensure pipeline.py exists and is in the Python path.")
