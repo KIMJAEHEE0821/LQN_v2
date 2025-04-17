@@ -21,6 +21,7 @@ from typing import List, Tuple, Dict, Any, Set, Optional, Union, Counter as Coun
 import sympy as sp
 from sympy.physics.quantum import Ket
 from sympy import Add
+from quantum_utils import *
 
 # ==============================================================================
 # Section 1: Perfect Matching Analysis Functions
@@ -735,6 +736,66 @@ def check_quantum_states_with_bit_flips(
                     results.append(result_tuple)
 
     return results
+
+def filter_by_state_count(result_dict, min_states=None, max_states=None, exact_states=None, hash_key=None):
+    """
+    Filter results to include only those with a specific number of quantum states.
+    
+    Parameters:
+    -----------
+    result_dict : dict
+        Result dictionary from process_graph_dict()
+    min_states : int, optional
+        Minimum number of states required (default: None)
+    max_states : int, optional
+        Maximum number of states allowed (default: None)
+    exact_states : int, optional
+        Exact number of states required (default: None)
+    hash_key : str, optional
+        Specific hash key to filter within (default: None, filter all hashes)
+        
+    Returns:
+    --------
+    dict
+        Filtered results dictionary with the same structure as the input
+    """
+    filtered_results = {}
+    
+    # Determine which hash keys to process
+    if hash_key is not None:
+        if hash_key not in result_dict:
+            return {}
+        hash_keys = [hash_key]
+    else:
+        hash_keys = result_dict.keys()
+    
+    # Process each hash key
+    for key in hash_keys:
+        filtered_list = []
+        
+        for state_data in result_dict[key]:
+            counter = state_data[0]  # State coefficient Counter
+            num_states = len(counter)
+            
+            # Check if number of states meets the criteria
+            matches = True
+            if exact_states is not None:
+                matches = (num_states == exact_states)
+            else:
+                if min_states is not None and num_states < min_states:
+                    matches = False
+                if max_states is not None and num_states > max_states:
+                    matches = False
+            
+            # Add to filtered results if it matches
+            if matches:
+                filtered_list.append(state_data)
+        
+        # Only add to results if there are filtered items
+        if filtered_list:
+            filtered_results[key] = filtered_list
+    
+    return filtered_results
 
 # def get_all_quantum_states(
 #     result_dict: Dict[str, List[List[Any]]],

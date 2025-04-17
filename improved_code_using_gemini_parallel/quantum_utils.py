@@ -293,3 +293,13 @@ def sorted_qs(
         save_sorted_qs[key] = unique_data
     return save_sorted_qs
 
+def apply_bit_flip(state: str, positions: List[int]) -> str:
+    """
+    Apply X-operator (bit flip) to specified positions in a quantum state.
+    Parameters: state (str), positions (list). Returns: str.
+    """
+    state_list = list(state)
+    for pos in positions:
+        if pos < len(state_list):
+            state_list[pos] = '1' if state_list[pos] == '0' else '0'
+    return ''.join(state_list)
