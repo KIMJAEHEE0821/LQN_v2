@@ -618,122 +618,223 @@ def check_quantum_states_exist(result_dict, target_states, hash_key=None):
     return results
 
 
+# --- Import the apply_bit_flip function from the other file ---
+try:
+    from quantum_utils import apply_bit_flip
+except ImportError:
+    print("ERROR: Failed to import 'apply_bit_flip' from 'quantum_utils.py'.", file=sys.stderr)
+    # Optionally, terminate the program here or define a dummy function.
+    # Example: def apply_bit_flip(*args, **kwargs): raise RuntimeError("apply_bit_flip not loaded")
+    raise # Re-raise the error to stop the program
+
+# --- igraph import handling block (located here as check_quantum_states_with_bit_flips uses it) ---
+try:
+    import igraph as ig
+    IGRAPH_INSTALLED = True
+except ImportError:
+    class DummyGraph: pass # Dummy class to use if igraph is not installed
+    ig = type("igraph", (object,), {"Graph": DummyGraph})() # Create a mock igraph.Graph module/class
+    IGRAPH_INSTALLED = False
+    print("Warning: 'igraph' library not found. Graph object type checks might be skipped.", file=sys.stderr)
+
+# --- Define CounterType Alias (located here as check_quantum_states_with_bit_flips uses it) ---
+CounterType: TypeAlias = Counter
+
+
+ # This function assumes the necessary imports and definitions are present
+# in the same file (state_analyzer.py context from previous examples):
+# import sys, Counter, chain, combinations, List, Dict, Any, Optional, Union, Tuple, TypeAlias
+# from quantum_utils import apply_bit_flip (or fallback)
+# igraph import handling (ig, IGRAPH_INSTALLED, DummyGraph)
+# CounterType alias
+
 def check_quantum_states_with_bit_flips(
     result_dict: Dict[str, List[List[Any]]],
     target_states: Union[str, List[str]],
     bit_flip_positions: Optional[List[int]] = None,
-    hash_key: Optional[str] = None
-) -> List[Tuple[str, ig.Graph, int, CounterType[str], List[int], Dict[str, int]]]: # Modified return type hint
+    hash_key: Optional[str] = None,
+    exact_num_states: Optional[int] = None
+) -> List[Tuple[str, Any, int, CounterType[str], List[int], Dict[str, int]]]: # Return type uses Any for graph if igraph optional
     """
-    Check if quantum states exist, considering possible bit flips at specified positions.
-    Returns results WITHOUT the original-to-flipped mapping.
+    Checks if quantum states exist in Counters within result_dict,
+    considering possible bit flips at specified positions. Finds only the *first*
+    successful bit flip combination for each Counter entry.
+    Optionally filters based on the exact number of states in the Counter.
+    Includes enhanced checks for data structure and logs unexpected errors.
 
     Parameters:
     -----------
     result_dict : dict
         Result dictionary. Assumed structure:
-        {'hash': [[Counter, data1, igraph_object, graph_index], ...], ...}
-        **NOTE:** Assumes Counter is at index 0, igraph.Graph at index 2, graph_index at index 3.
-                 Adjust indices below if your structure differs.
-    target_states : list or str
-        List of quantum states to search for, or a single state as string.
-    bit_flip_positions : list or None
-        List of positions where bit flips should be tried.
-        If None, all possible combinations of bit flips will be tried.
-    hash_key : str, optional
-        Specific hash key to search within (default: None, search all hashes).
+        {'hash': [[Counter_obj, data1, graph_obj, graph_idx], ...], ...}
+        **NOTE:** Assumes Counter at index 0, graph object at index 2,
+                 graph index (int) at index 3. Adjust indices constants if needed.
+    target_states : Union[str, List[str]]
+        Quantum state(s) to search for (e.g., '010' or ['010', '111']).
+    bit_flip_positions : Optional[List[int]], default=None
+        List of 0-based positions where bit flips are allowed.
+        If None, all combinations of flips across the longest target state's
+        length are tried (can be computationally expensive).
+    hash_key : Optional[str], default=None
+        Specific hash key to search within result_dict. If None, searches all keys.
+    exact_num_states : Optional[int], default=None
+        If provided, only inspects Counters having exactly this number of states.
 
     Returns:
     --------
-    list
-        List of tuples, where each tuple represents a successful match:
-        (
-            hash_key: Hash key (str),
-            graph_object: The igraph object (igraph.Graph),
-            graph_index: Graph index (int),
-            original_counter: The full Counter object (Counter),
-            applied_flips: List of positions where bits were flipped (List[int]),
-            # original_to_flipped_mapping REMOVED
-            found_flipped_states: Dictionary of {found_flipped_state: coefficient} (Dict[str, int])
-        )
+    List[Tuple[str, Any, int, CounterType[str], List[int], Dict[str, int]]]
+        List of tuples for successful matches (max one per input Counter entry):
+        (hash_key, graph_object, graph_index, original_counter,
+         applied_flips_list, found_flipped_states_with_coeffs_dict)
+        The type of graph_object depends on whether 'igraph' is installed and used.
+
+    Raises:
+    -------
+    TypeError
+        If `target_states` is not a string or list of strings, or if elements
+        within the list are not strings.
     """
     results = []
 
-    local_target_states = []
+    # --- Input Processing: target_states ---
+    local_target_states: List[str] = []
     if isinstance(target_states, str):
-        local_target_states = [target_states]
+        if target_states: local_target_states = [target_states]
     elif isinstance(target_states, list):
-        local_target_states = target_states
+        if all(isinstance(s, str) for s in target_states):
+            local_target_states = [s for s in target_states if s] # Keep non-empty strings
+        else:
+            raise TypeError("If target_states is a list, all elements must be strings.")
     else:
-        pass
+        raise TypeError("target_states must be a string or a list of strings.")
 
     if not local_target_states:
+         print("Warning: No valid non-empty target states provided to search for.", file=sys.stderr)
          return []
 
-    search_keys = []
+    # --- Input Processing: search_keys ---
+    search_keys: List[str] = []
     if hash_key is not None:
         if hash_key in result_dict:
             search_keys = [hash_key]
         else:
+            print(f"Warning: Specified hash_key '{hash_key}' not found in result_dict.", file=sys.stderr)
             return []
     else:
         search_keys = list(result_dict.keys())
+    if not search_keys:
+        print("Warning: No keys to search in result_dict.", file=sys.stderr)
+        return []
 
-    actual_bit_flip_positions = bit_flip_positions
-    if actual_bit_flip_positions is None:
-        if local_target_states and len(local_target_states[0]) > 0:
-             max_length = max(len(state) for state in local_target_states)
-             actual_bit_flip_positions = list(range(max_length))
-        else:
+    # --- Input Processing: bit_flip_positions ---
+    actual_bit_flip_positions: List[int] = []
+    if bit_flip_positions is None:
+        try:
+            max_length = max(len(state) for state in local_target_states) if local_target_states else 0
+            if max_length > 0:
+                 actual_bit_flip_positions = list(range(max_length))
+        except ValueError:
+             print("Warning: Could not determine max length for default bit flips.", file=sys.stderr)
              actual_bit_flip_positions = []
+    elif isinstance(bit_flip_positions, list):
+         valid_positions = [p for p in bit_flip_positions if isinstance(p, int) and p >= 0]
+         if len(valid_positions) != len(bit_flip_positions):
+             print("Warning: Some invalid values (non-integer or negative) removed from bit_flip_positions.", file=sys.stderr)
+         actual_bit_flip_positions = sorted(list(set(valid_positions))) # Unique, sorted, non-negative ints
+    else:
+         print("Warning: Invalid type for bit_flip_positions. No bit flips will be considered.", file=sys.stderr)
+         actual_bit_flip_positions = [] # Ensure it's a list
 
+    # --- Generate Bit Flip Combinations ---
     all_combinations = list(chain.from_iterable(
         combinations(actual_bit_flip_positions, r) for r in range(len(actual_bit_flip_positions) + 1)
     ))
+    if not all_combinations:
+        all_combinations = [()] # Represents the "no flip" case
 
+    # --- Define Indices (Constants for clarity) ---
     COUNTER_IDX = 0
-    GRAPH_OBJ_IDX = 2 # !!! ADJUST THIS INDEX if igraph object is elsewhere !!!
-    GRAPH_IDX_IDX = 3 # !!! ADJUST THIS INDEX if graph index is elsewhere !!!
+    GRAPH_OBJ_IDX = 2
+    GRAPH_IDX_IDX = 3
+    MIN_DATA_LEN = max(COUNTER_IDX, GRAPH_OBJ_IDX, GRAPH_IDX_IDX) + 1
 
+    # --- Main Processing Loop ---
     for key in search_keys:
-        if key not in result_dict:
+        if key not in result_dict or not isinstance(result_dict[key], list):
+            print(f"Warning: Skipping key '{key}'. Missing or invalid data format (expected list).", file=sys.stderr)
             continue
-        for state_data in result_dict[key]:
-            # Basic checks
-            if not isinstance(state_data, (list, tuple)) or len(state_data) <= max(COUNTER_IDX, GRAPH_OBJ_IDX, GRAPH_IDX_IDX): continue
-            if not isinstance(state_data[COUNTER_IDX], Counter): continue
 
+        for i, state_data in enumerate(result_dict[key]):
+            # --- Structure and Type Validation for each item ---
+            if not isinstance(state_data, (list, tuple)) or len(state_data) < MIN_DATA_LEN:
+                print(f"Warning: Skipping item {i} for key '{key}'. Invalid structure or length < {MIN_DATA_LEN}.", file=sys.stderr)
+                continue
+
+            # Validate Counter
             counter = state_data[COUNTER_IDX]
-            graph_obj = state_data[GRAPH_OBJ_IDX]
-            graph_idx = state_data[GRAPH_IDX_IDX]
+            if not isinstance(counter, Counter):
+                print(f"Warning: Skipping item {i} for key '{key}'. Expected Counter at index {COUNTER_IDX}, found {type(counter).__name__}.", file=sys.stderr)
+                continue
 
+            # Validate Graph Object (conditionally if igraph installed)
+            graph_obj = state_data[GRAPH_OBJ_IDX]
+            if IGRAPH_INSTALLED and not isinstance(graph_obj, ig.Graph):
+                 print(f"Warning: Skipping item {i} for key '{key}'. Expected igraph.Graph at index {GRAPH_OBJ_IDX}, found {type(graph_obj).__name__}.", file=sys.stderr)
+                 continue
+
+            # Validate Graph Index
+            graph_idx = state_data[GRAPH_IDX_IDX]
+            if not isinstance(graph_idx, int):
+                 print(f"Warning: Skipping item {i} for key '{key}'. Expected int at index {GRAPH_IDX_IDX}, found {type(graph_idx).__name__}.", file=sys.stderr)
+                 continue
+
+            # --- Exact State Count Filter ---
+            if exact_num_states is not None and len(counter) != exact_num_states:
+                continue # Skip if the number of states doesn't match exactly
+
+            # --- Iterate through Bit Flip Combinations ---
+            # This inner loop will now stop for the current state_data
+            # as soon as the first valid flip combination is found.
             for bit_positions_tuple in all_combinations:
-                bit_positions = list(bit_positions_tuple)
+                bit_positions = list(bit_positions_tuple) # Use list version
+
                 try:
+                    # Apply flips to all target states for this combination
                     flipped_targets = [apply_bit_flip(state, bit_positions) for state in local_target_states]
-                except Exception:
+
+                    # Check if ALL flipped target states exist in the current counter
+                    all_states_exist = all(flipped_state in counter for flipped_state in flipped_targets)
+
+                    if all_states_exist:
+                        # Retrieve coefficients for the found states
+                        state_coefficients = {state: counter[state] for state in flipped_targets}
+
+                        # Construct and append the result tuple
+                        result_tuple = (
+                            key,
+                            graph_obj,
+                            graph_idx,
+                            counter,
+                            bit_positions, # List of positions flipped for this match
+                            state_coefficients
+                        )
+                        results.append(result_tuple)
+
+                        # --- BREAK ADDED ---
+                        # Stop searching for other flip combinations for THIS state_data item
+                        # once the first successful one is found.
+                        break
+                        # --- END OF ADDED BREAK ---
+
+                except Exception as e:
+                    # Catch unexpected errors during flip application or check
+                    print(f"Warning: Unexpected error during processing for key '{key}', item {i}, flips {bit_positions}: {e}. Skipping this combination.", file=sys.stderr)
+                    # Continue to the next flip combination even if one fails
                     continue
 
-                all_states_exist = all(state in counter for state in flipped_targets)
-
-                if all_states_exist:
-                    # Create dictionary of found flipped states and their coefficients
-                    state_coefficients = {state: counter.get(state, 0) for state in flipped_targets}
-
-                    # *** REMOVED: Line calculating original_to_flipped ***
-                    # original_to_flipped = {original: flipped for original, flipped in zip(local_target_states, flipped_targets)}
-
-                    # Construct the result tuple WITHOUT the mapping dictionary
-                    result_tuple = (
-                        key,                   # hash_key
-                        graph_obj,             # graph_object
-                        graph_idx,             # graph_index
-                        counter,               # original_counter
-                        bit_positions,         # applied_flips (List[int])
-                        # original_to_flipped removed
-                        state_coefficients     # found_flipped_states (Dict[str, int])
-                    )
-                    results.append(result_tuple)
+            # End of loop for bit_positions_tuple for the current state_data
+        # End of loop for state_data in result_dict[key]
+    # End of loop for key in search_keys
 
     return results
 
