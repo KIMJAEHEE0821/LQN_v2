@@ -649,13 +649,217 @@ CounterType: TypeAlias = Counter
 # igraph import handling (ig, IGRAPH_INSTALLED, DummyGraph)
 # CounterType alias
 
+# def check_quantum_states_with_bit_flips(
+#     result_dict: Dict[str, List[List[Any]]],
+#     target_states: Union[str, List[str]],
+#     bit_flip_positions: Optional[List[int]] = None,
+#     hash_key: Optional[str] = None,
+#     exact_num_states: Optional[int] = None
+# ) -> List[Tuple[str, Any, int, CounterType[str], List[int], Dict[str, int]]]: # Return type uses Any for graph if igraph optional
+#     """
+#     Checks if quantum states exist in Counters within result_dict,
+#     considering possible bit flips at specified positions. Finds only the *first*
+#     successful bit flip combination for each Counter entry.
+#     Optionally filters based on the exact number of states in the Counter.
+#     Includes enhanced checks for data structure and logs unexpected errors.
+
+#     Parameters:
+#     -----------
+#     result_dict : dict
+#         Result dictionary. Assumed structure:
+#         {'hash': [[Counter_obj, data1, graph_obj, graph_idx], ...], ...}
+#         **NOTE:** Assumes Counter at index 0, graph object at index 2,
+#                  graph index (int) at index 3. Adjust indices constants if needed.
+#     target_states : Union[str, List[str]]
+#         Quantum state(s) to search for (e.g., '010' or ['010', '111']).
+#     bit_flip_positions : Optional[List[int]], default=None
+#         List of 0-based positions where bit flips are allowed.
+#         If None, all combinations of flips across the longest target state's
+#         length are tried (can be computationally expensive).
+#     hash_key : Optional[str], default=None
+#         Specific hash key to search within result_dict. If None, searches all keys.
+#     exact_num_states : Optional[int], default=None
+#         If provided, only inspects Counters having exactly this number of states.
+
+#     Returns:
+#     --------
+#     List[Tuple[str, Any, int, CounterType[str], List[int], Dict[str, int]]]
+#         List of tuples for successful matches (max one per input Counter entry):
+#         (hash_key, graph_object, graph_index, original_counter,
+#          applied_flips_list, found_flipped_states_with_coeffs_dict)
+#         The type of graph_object depends on whether 'igraph' is installed and used.
+
+#     Raises:
+#     -------
+#     TypeError
+#         If `target_states` is not a string or list of strings, or if elements
+#         within the list are not strings.
+#     """
+#     results = []
+
+#     # --- Input Processing: target_states ---
+#     local_target_states: List[str] = []
+#     if isinstance(target_states, str):
+#         if target_states: local_target_states = [target_states]
+#     elif isinstance(target_states, list):
+#         if all(isinstance(s, str) for s in target_states):
+#             local_target_states = [s for s in target_states if s] # Keep non-empty strings
+#         else:
+#             raise TypeError("If target_states is a list, all elements must be strings.")
+#     else:
+#         raise TypeError("target_states must be a string or a list of strings.")
+
+#     if not local_target_states:
+#          print("Warning: No valid non-empty target states provided to search for.", file=sys.stderr)
+#          return []
+
+#     # --- Input Processing: search_keys ---
+#     search_keys: List[str] = []
+#     if hash_key is not None:
+#         if hash_key in result_dict:
+#             search_keys = [hash_key]
+#         else:
+#             print(f"Warning: Specified hash_key '{hash_key}' not found in result_dict.", file=sys.stderr)
+#             return []
+#     else:
+#         search_keys = list(result_dict.keys())
+#     if not search_keys:
+#         print("Warning: No keys to search in result_dict.", file=sys.stderr)
+#         return []
+
+#     # --- Input Processing: bit_flip_positions ---
+#     actual_bit_flip_positions: List[int] = []
+#     if bit_flip_positions is None:
+#         try:
+#             max_length = max(len(state) for state in local_target_states) if local_target_states else 0
+#             if max_length > 0:
+#                  actual_bit_flip_positions = list(range(max_length))
+#         except ValueError:
+#              print("Warning: Could not determine max length for default bit flips.", file=sys.stderr)
+#              actual_bit_flip_positions = []
+#     elif isinstance(bit_flip_positions, list):
+#          valid_positions = [p for p in bit_flip_positions if isinstance(p, int) and p >= 0]
+#          if len(valid_positions) != len(bit_flip_positions):
+#              print("Warning: Some invalid values (non-integer or negative) removed from bit_flip_positions.", file=sys.stderr)
+#          actual_bit_flip_positions = sorted(list(set(valid_positions))) # Unique, sorted, non-negative ints
+#     else:
+#          print("Warning: Invalid type for bit_flip_positions. No bit flips will be considered.", file=sys.stderr)
+#          actual_bit_flip_positions = [] # Ensure it's a list
+
+#     # --- Generate Bit Flip Combinations ---
+#     all_combinations = list(chain.from_iterable(
+#         combinations(actual_bit_flip_positions, r) for r in range(len(actual_bit_flip_positions) + 1)
+#     ))
+#     if not all_combinations:
+#         all_combinations = [()] # Represents the "no flip" case
+
+#     # --- Define Indices (Constants for clarity) ---
+#     COUNTER_IDX = 0
+#     GRAPH_OBJ_IDX = 2
+#     GRAPH_IDX_IDX = 3
+#     MIN_DATA_LEN = max(COUNTER_IDX, GRAPH_OBJ_IDX, GRAPH_IDX_IDX) + 1
+
+#     # --- Main Processing Loop ---
+#     for key in search_keys:
+#         if key not in result_dict or not isinstance(result_dict[key], list):
+#             print(f"Warning: Skipping key '{key}'. Missing or invalid data format (expected list).", file=sys.stderr)
+#             continue
+
+#         for i, state_data in enumerate(result_dict[key]):
+#             # --- Structure and Type Validation for each item ---
+#             if not isinstance(state_data, (list, tuple)) or len(state_data) < MIN_DATA_LEN:
+#                 print(f"Warning: Skipping item {i} for key '{key}'. Invalid structure or length < {MIN_DATA_LEN}.", file=sys.stderr)
+#                 continue
+
+#             # Validate Counter
+#             counter = state_data[COUNTER_IDX]
+#             if not isinstance(counter, Counter):
+#                 print(f"Warning: Skipping item {i} for key '{key}'. Expected Counter at index {COUNTER_IDX}, found {type(counter).__name__}.", file=sys.stderr)
+#                 continue
+
+#             # Validate Graph Object (conditionally if igraph installed)
+#             graph_obj = state_data[GRAPH_OBJ_IDX]
+#             if IGRAPH_INSTALLED and not isinstance(graph_obj, ig.Graph):
+#                  print(f"Warning: Skipping item {i} for key '{key}'. Expected igraph.Graph at index {GRAPH_OBJ_IDX}, found {type(graph_obj).__name__}.", file=sys.stderr)
+#                  continue
+
+#             # Validate Graph Index
+#             graph_idx = state_data[GRAPH_IDX_IDX]
+#             if not isinstance(graph_idx, int):
+#                  print(f"Warning: Skipping item {i} for key '{key}'. Expected int at index {GRAPH_IDX_IDX}, found {type(graph_idx).__name__}.", file=sys.stderr)
+#                  continue
+
+#             # --- Exact State Count Filter ---
+#             if exact_num_states is not None and len(counter) != exact_num_states:
+#                 continue # Skip if the number of states doesn't match exactly
+
+#             # --- Iterate through Bit Flip Combinations ---
+#             # This inner loop will now stop for the current state_data
+#             # as soon as the first valid flip combination is found.
+#             for bit_positions_tuple in all_combinations:
+#                 bit_positions = list(bit_positions_tuple) # Use list version
+
+#                 try:
+#                     # Apply flips to all target states for this combination
+#                     flipped_targets = [apply_bit_flip(state, bit_positions) for state in local_target_states]
+
+#                     # Check if ALL flipped target states exist in the current counter
+#                     all_states_exist = all(flipped_state in counter for flipped_state in flipped_targets)
+
+#                     if all_states_exist:
+#                         # Retrieve coefficients for the found states
+#                         state_coefficients = {state: counter[state] for state in flipped_targets}
+
+#                         # Construct and append the result tuple
+#                         result_tuple = (
+#                             key,
+#                             graph_obj,
+#                             graph_idx,
+#                             counter,
+#                             bit_positions, # List of positions flipped for this match
+#                             state_coefficients
+#                         )
+#                         results.append(result_tuple)
+
+#                         # --- BREAK ADDED ---
+#                         # Stop searching for other flip combinations for THIS state_data item
+#                         # once the first successful one is found.
+#                         break
+#                         # --- END OF ADDED BREAK ---
+
+#                 except Exception as e:
+#                     # Catch unexpected errors during flip application or check
+#                     print(f"Warning: Unexpected error during processing for key '{key}', item {i}, flips {bit_positions}: {e}. Skipping this combination.", file=sys.stderr)
+#                     # Continue to the next flip combination even if one fails
+#                     continue
+
+#             # End of loop for bit_positions_tuple for the current state_data
+#         # End of loop for state_data in result_dict[key]
+#     # End of loop for key in search_keys
+
+#     return results
+
+
+# --- Conditional igraph import ---
+try:
+    import igraph as ig
+    IGRAPH_INSTALLED = True
+except ImportError:
+    IGRAPH_INSTALLED = False
+    # Define a placeholder if igraph is not essential for the core logic
+    # Or ensure the graph object handling doesn't strictly require ig.Graph type
+    class ig: # Basic placeholder if needed
+        class Graph: pass
+    print("Warning: igraph library not found. Graph object type validation might be affected.", file=sys.stderr)
+
+
 def check_quantum_states_with_bit_flips(
     result_dict: Dict[str, List[List[Any]]],
     target_states: Union[str, List[str]],
     bit_flip_positions: Optional[List[int]] = None,
     hash_key: Optional[str] = None,
     exact_num_states: Optional[int] = None
-) -> List[Tuple[str, Any, int, CounterType[str], List[int], Dict[str, int]]]: # Return type uses Any for graph if igraph optional
+) -> List[Tuple[str, Any, int, Any, CounterType[str], List[int], Dict[str, int]]]: # MODIFIED return type
     """
     Checks if quantum states exist in Counters within result_dict,
     considering possible bit flips at specified positions. Finds only the *first*
@@ -667,9 +871,10 @@ def check_quantum_states_with_bit_flips(
     -----------
     result_dict : dict
         Result dictionary. Assumed structure:
-        {'hash': [[Counter_obj, data1, graph_obj, graph_idx], ...], ...}
-        **NOTE:** Assumes Counter at index 0, graph object at index 2,
-                 graph index (int) at index 3. Adjust indices constants if needed.
+        {'hash': [[Counter_obj, perfect_matching_data, graph_obj, graph_idx], ...], ...}
+        **NOTE:** Assumes Counter at index 0, perfect_matching_data at index 1,
+                 graph object at index 2, graph index (int) at index 3.
+                 Adjust index constants if the structure differs.
     target_states : Union[str, List[str]]
         Quantum state(s) to search for (e.g., '010' or ['010', '111']).
     bit_flip_positions : Optional[List[int]], default=None
@@ -683,11 +888,13 @@ def check_quantum_states_with_bit_flips(
 
     Returns:
     --------
-    List[Tuple[str, Any, int, CounterType[str], List[int], Dict[str, int]]]
+    List[Tuple[str, Any, int, Any, CounterType[str], List[int], Dict[str, int]]] # MODIFIED return type description
         List of tuples for successful matches (max one per input Counter entry):
-        (hash_key, graph_object, graph_index, original_counter,
-         applied_flips_list, found_flipped_states_with_coeffs_dict)
+        (hash_key, graph_object, graph_index, perfect_matching_data, # ADDED perfect_matching_data
+         original_counter, applied_flips_list,
+         found_flipped_states_with_coeffs_dict)
         The type of graph_object depends on whether 'igraph' is installed and used.
+        The type of perfect_matching_data depends on how it's stored in result_dict.
 
     Raises:
     -------
@@ -754,10 +961,13 @@ def check_quantum_states_with_bit_flips(
         all_combinations = [()] # Represents the "no flip" case
 
     # --- Define Indices (Constants for clarity) ---
+    # Assumed structure for inner list: [Counter, PerfectMatching, GraphObj, GraphIdx, ...]
     COUNTER_IDX = 0
+    PERFECT_MATCHING_IDX = 1 # <<< Index for Perfect Matching Data
     GRAPH_OBJ_IDX = 2
     GRAPH_IDX_IDX = 3
-    MIN_DATA_LEN = max(COUNTER_IDX, GRAPH_OBJ_IDX, GRAPH_IDX_IDX) + 1
+    # Ensure minimum length covers all accessed indices
+    MIN_DATA_LEN = max(COUNTER_IDX, PERFECT_MATCHING_IDX, GRAPH_OBJ_IDX, GRAPH_IDX_IDX) + 1
 
     # --- Main Processing Loop ---
     for key in search_keys:
@@ -777,11 +987,18 @@ def check_quantum_states_with_bit_flips(
                 print(f"Warning: Skipping item {i} for key '{key}'. Expected Counter at index {COUNTER_IDX}, found {type(counter).__name__}.", file=sys.stderr)
                 continue
 
+            # --- Get Perfect Matching Data ---
+            # Assuming it's at index PERFECT_MATCHING_IDX.
+            # Add specific type validation here if needed/known.
+            perfect_matching_data = state_data[PERFECT_MATCHING_IDX] # <<< EXTRACTED DATA
+
             # Validate Graph Object (conditionally if igraph installed)
             graph_obj = state_data[GRAPH_OBJ_IDX]
             if IGRAPH_INSTALLED and not isinstance(graph_obj, ig.Graph):
-                 print(f"Warning: Skipping item {i} for key '{key}'. Expected igraph.Graph at index {GRAPH_OBJ_IDX}, found {type(graph_obj).__name__}.", file=sys.stderr)
-                 continue
+                 # Allow for graph_obj being None or some other placeholder if igraph isn't used everywhere
+                 if graph_obj is not None: # Only warn if it's not None and not an ig.Graph
+                     print(f"Warning: For key '{key}', item {i}: Expected igraph.Graph or None at index {GRAPH_OBJ_IDX}, found {type(graph_obj).__name__}.", file=sys.stderr)
+                 # Depending on requirements, you might want to 'continue' here if graph_obj is mandatory
 
             # Validate Graph Index
             graph_idx = state_data[GRAPH_IDX_IDX]
@@ -810,11 +1027,12 @@ def check_quantum_states_with_bit_flips(
                         # Retrieve coefficients for the found states
                         state_coefficients = {state: counter[state] for state in flipped_targets}
 
-                        # Construct and append the result tuple
+                        # --- Construct result tuple with perfect matching data ---
                         result_tuple = (
                             key,
                             graph_obj,
                             graph_idx,
+                            perfect_matching_data, # <<< ADDED perfect_matching_data here
                             counter,
                             bit_positions, # List of positions flipped for this match
                             state_coefficients
@@ -840,66 +1058,65 @@ def check_quantum_states_with_bit_flips(
     return results
 
 
-
-def filter_by_state_count(result_dict, min_states=None, max_states=None, exact_states=None, hash_key=None):
-    """
-    Filter results to include only those with a specific number of quantum states.
+# def filter_by_state_count(result_dict, min_states=None, max_states=None, exact_states=None, hash_key=None):
+#     """
+#     Filter results to include only those with a specific number of quantum states.
     
-    Parameters:
-    -----------
-    result_dict : dict
-        Result dictionary from process_graph_dict()
-    min_states : int, optional
-        Minimum number of states required (default: None)
-    max_states : int, optional
-        Maximum number of states allowed (default: None)
-    exact_states : int, optional
-        Exact number of states required (default: None)
-    hash_key : str, optional
-        Specific hash key to filter within (default: None, filter all hashes)
+#     Parameters:
+#     -----------
+#     result_dict : dict
+#         Result dictionary from process_graph_dict()
+#     min_states : int, optional
+#         Minimum number of states required (default: None)
+#     max_states : int, optional
+#         Maximum number of states allowed (default: None)
+#     exact_states : int, optional
+#         Exact number of states required (default: None)
+#     hash_key : str, optional
+#         Specific hash key to filter within (default: None, filter all hashes)
         
-    Returns:
-    --------
-    dict
-        Filtered results dictionary with the same structure as the input
-    """
-    filtered_results = {}
+#     Returns:
+#     --------
+#     dict
+#         Filtered results dictionary with the same structure as the input
+#     """
+#     filtered_results = {}
     
-    # Determine which hash keys to process
-    if hash_key is not None:
-        if hash_key not in result_dict:
-            return {}
-        hash_keys = [hash_key]
-    else:
-        hash_keys = result_dict.keys()
+#     # Determine which hash keys to process
+#     if hash_key is not None:
+#         if hash_key not in result_dict:
+#             return {}
+#         hash_keys = [hash_key]
+#     else:
+#         hash_keys = result_dict.keys()
     
-    # Process each hash key
-    for key in hash_keys:
-        filtered_list = []
+#     # Process each hash key
+#     for key in hash_keys:
+#         filtered_list = []
         
-        for state_data in result_dict[key]:
-            counter = state_data[0]  # State coefficient Counter
-            num_states = len(counter)
+#         for state_data in result_dict[key]:
+#             counter = state_data[0]  # State coefficient Counter
+#             num_states = len(counter)
             
-            # Check if number of states meets the criteria
-            matches = True
-            if exact_states is not None:
-                matches = (num_states == exact_states)
-            else:
-                if min_states is not None and num_states < min_states:
-                    matches = False
-                if max_states is not None and num_states > max_states:
-                    matches = False
+#             # Check if number of states meets the criteria
+#             matches = True
+#             if exact_states is not None:
+#                 matches = (num_states == exact_states)
+#             else:
+#                 if min_states is not None and num_states < min_states:
+#                     matches = False
+#                 if max_states is not None and num_states > max_states:
+#                     matches = False
             
-            # Add to filtered results if it matches
-            if matches:
-                filtered_list.append(state_data)
+#             # Add to filtered results if it matches
+#             if matches:
+#                 filtered_list.append(state_data)
         
-        # Only add to results if there are filtered items
-        if filtered_list:
-            filtered_results[key] = filtered_list
+#         # Only add to results if there are filtered items
+#         if filtered_list:
+#             filtered_results[key] = filtered_list
     
-    return filtered_results
+#     return filtered_results
 
 # def get_all_quantum_states(
 #     result_dict: Dict[str, List[List[Any]]],

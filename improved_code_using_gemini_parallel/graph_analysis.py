@@ -11,14 +11,20 @@ from typing import List, Tuple, Dict, Any, Iterator, Set, Optional # For type hi
 
 # --- Graph Conversion ---
 
+import igraph as ig
+import numpy as np
+from typing import List, Tuple, Any, Dict # 타입 힌트를 위해 추가
+
+import igraph as ig
+import numpy as np
+from typing import List, Tuple, Any, Dict
+
 def EPM_digraph_from_EPM_bipartite_graph_igraph(B: ig.Graph) -> ig.Graph:
     """
     Converts an EPM bipartite graph (B) from igraph format to a directed graph (D).
-
-    This function classifies nodes of the input bipartite graph B into 'system',
-    'ancilla', and 'sculpting' categories, then generates directed edges
-    between nodes according to specific rules, returning a new directed graph D.
-    It uses adjacency matrix operations to determine edge direction and weights.
+    Edges in D originate from system/ancilla nodes ('i') and target nodes ('j')
+    determined by sculpting node indices ('k' where j=k). The edge direction
+    is swapped from the original interpretation (i -> j instead of j -> i).
 
     Parameters:
     -----------
@@ -42,133 +48,274 @@ def EPM_digraph_from_EPM_bipartite_graph_igraph(B: ig.Graph) -> ig.Graph:
     Exception:
         For any other unexpected errors during conversion.
     """
-    try:
-        # Identify system, ancilla, and sculpting nodes
+    try: # Start error handling
+        # --- 1. Classify nodes and count ---
+        # Store the *index* of nodes belonging to each category ('system_nodes', 'ancilla_nodes', 'sculpting_nodes') in lists.
         system_nodes = [v.index for v in B.vs if v['category'] == "system_nodes"]
         ancilla_nodes = [v.index for v in B.vs if v['category'] == "ancilla_nodes"]
         sculpting_nodes = [v.index for v in B.vs if v['category'] == "sculpting_nodes"]
 
+        # Calculate the number of nodes for each category.
         num_system = len(system_nodes)
         num_ancilla = len(ancilla_nodes)
         num_sculpting = len(sculpting_nodes)
+        # Get the total number of nodes in the input graph B.
         num_total_bipartite = B.vcount()
-        num_total_digraph = num_system + num_ancilla # Number of nodes in the resulting directed graph
+        # The number of nodes in the final directed graph D is the sum of system and ancilla nodes
+        num_total_digraph = num_system + num_ancilla
 
-        # --- Validations ---
+        # --- 2. Validations ---
+        # Check if the sum of classified node counts matches the total node count in B.
         if num_total_bipartite != num_system + num_ancilla + num_sculpting:
             raise ValueError("Sum of node counts does not match the total number of nodes in the bipartite graph.")
-        # Assuming the number of sculpting nodes should match the number of system + ancilla nodes
-        # Adjust this logic if the EPM definition used is different
+        # Warn if the sculpting node count differs from the final graph D's node count (may relate to j=k mapping)
         if num_sculpting != num_total_digraph:
-            print(f"Warning: Sculpting node count ({num_sculpting}) does not match system+ancilla count ({num_total_digraph}). Ensure this is intended.")
-            # Optionally, raise ValueError if this should be strictly enforced
+            print(f"Warning: Sculpting node count ({num_sculpting}) does not match system+ancilla count ({num_total_digraph}). Ensure the mapping 'j=k' and its implications are intended.")
 
-        # Prepare node order: system, ancilla, sculpting
+        # --- 3. Calculate and reorder adjacency matrix ---
+        # Node order: system -> ancilla -> sculpting
         ordered_vertices = system_nodes + ancilla_nodes + sculpting_nodes
-
-        # Calculate adjacency matrix (with weights)
-        # Ensure it's a dense numpy array
-        # Use get_adjacency_sparse() if memory is a concern for large graphs
+        # Calculate weighted adjacency matrix (convert to NumPy array)
         adj_matrix_B = np.array(B.get_adjacency(attribute="weight").data)
-
-        # Create reordered adjacency matrix using NumPy indexing
-        # Size: (num_total_bipartite, num_total_bipartite)
+        # Reorder the adjacency matrix according to ordered_vertices
         reordered_adj_matrix = adj_matrix_B[np.ix_(ordered_vertices, ordered_vertices)]
 
-        # Extract the relevant submatrix for the directed graph
-        # Rows: system + ancilla nodes (indices 0 to num_total_digraph-1 in reordered matrix)
-        # Columns: sculpting nodes (indices num_total_digraph to num_total_bipartite-1 in reordered matrix)
-        # adj_matrix_D_sub[i, k] is the weight between the i-th (sys/anc) node and the k-th sculpting node
+        # --- 4. Extract edge information for directed graph D ---
+        # Extract the submatrix used for calculating edges in graph D
+        # Rows: system+ancilla nodes, Columns: sculpting nodes
         adj_matrix_D_sub = reordered_adj_matrix[:num_total_digraph, num_total_digraph:]
 
-        # Initialize the directed graph D
+        # --- 5. Initialize directed graph D and set node attributes ---
+        # Create D as a directed graph with num_total_digraph nodes
         D = ig.Graph(n=num_total_digraph, directed=True)
-
-        # Set node attributes for D
+        # Set 'category' and 'name' attributes for the nodes in graph D
         categories = ["system_nodes"] * num_system + ["ancilla_nodes"] * num_ancilla
         node_names = [f"S_{i}" for i in range(num_system)] + [f"A_{i}" for i in range(num_ancilla)]
         D.vs["category"] = categories
         D.vs["name"] = node_names
 
-        # Add directed edges
+        # --- 6. Add Directed Edges (Simple Source/Target Swap) ---
         edges: List[Tuple[int, int]] = []
         weights: List[float] = []
 
-        # Edge direction in D is from sculpting node index 'j' to system/ancilla node index 'i'
-        # We assume the index 'j' of the sculpting node corresponds to the node index 'j' in the directed graph D
-        for i in range(num_total_digraph): # Index for system/ancilla nodes in D
-            for k in range(num_sculpting): # Index for sculpting nodes in the submatrix column
-                # Map sculpting node index 'k' to potential source node 'j' in D
-                j = k # Assuming direct mapping; adjust if needed based on EPM definition
-                if j < num_total_digraph: # Ensure source node index 'j' is valid for D
+        # Loops and variable setup same as original logic
+        for i in range(num_total_digraph): # Originally: Target role -> Now: Source role (system/ancilla node index)
+            for k in range(num_sculpting): # Sculpting node index
+                # Map sculpting index k to node j in D (Originally: Source -> Now: Target)
+                j = k
+                if j < num_total_digraph: # Ensure target node index j is valid for D
+                    # Weight is from connection between node i (now source) and sculpting node k
                     weight = adj_matrix_D_sub[i, k]
                     if weight != 0:
-                        # Direction is from j to i (consistent with original code logic)
-                        edges.append((j, i))
+                        # *** Change Point: Edge direction changed to (i, j) ***
+                        # i.e., add edge from system/ancilla node i to node j corresponding to sculpting node k
+                        edges.append((i, j)) # Edge from i to j
                         weights.append(weight)
                 else:
-                     # This case might occur if num_sculpting > num_total_digraph, which was warned about earlier
-                     print(f"Warning: Sculpting node index {k} maps to digraph index {j}, which is out of bounds ({num_total_digraph}). Skipping potential edge.")
+                     # Case where j is out of bounds (can happen if num_sculpting > num_total_digraph and k >= num_total_digraph)
+                     # In this case, there is no valid target j reachable from source i, so the edge is not created.
+                     print(f"Warning: Sculpting node index {k} maps to digraph index {j}, which is out of bounds ({num_total_digraph}). Skipping potential edge from source {i} targetted at {j}.")
 
+        # --- 7. Final application of edges and weights to graph D ---
         if edges:
             D.add_edges(edges)
             D.es["weight"] = weights
 
+        # --- 8. Return result ---
         return D
 
+    # --- Error Handling ---
     except KeyError as e:
         print(f"Error: Missing required attribute in input graph B: {e}")
-        # Re-raise the exception to signal the error upwards
         raise
     except ValueError as e:
         print(f"Error: Graph structure validation failed: {e}")
         raise
     except Exception as e:
-        # Catch any other unexpected errors
         print(f"An unexpected error occurred during digraph conversion: {e}")
-        raise # Re-raise the exception
+        raise
 
-# --- Isomorphism and Grouping ---
-
-# def canonical_form_without_weights(ig_graph: ig.Graph) -> tuple:
+# def EPM_digraph_from_EPM_bipartite_graph_igraph(B: ig.Graph) -> ig.Graph:
 #     """
-#     Generates a canonical representation (adjacency matrix) of the graph structure,
-#     ignoring edge weights and node/edge attributes other than connectivity.
-
-#     Uses igraph's canonical permutation.
-
+#     Converts an EPM bipartite graph (B) from igraph format to a directed graph (D).
+    
 #     Parameters:
 #     -----------
-#     ig_graph : igraph.Graph
-#         The input graph.
-
+#     B : igraph.Graph
+#         The EPM bipartite graph in igraph format.
+#         Required node attributes: 'category' ('system_nodes', 'ancilla_nodes', 'sculpting_nodes')
+#         Required edge attributes: 'weight'
+        
 #     Returns:
 #     --------
-#     tuple
-#         A tuple representation of the permuted adjacency matrix, suitable for hashing or comparison.
+#     igraph.Graph
+#         A directed graph where nodes are system and ancilla nodes from B,
+#         and edges represent relationships derived from connections to sculpting nodes.
+        
+#     Raises:
+#     -------
+#     KeyError: If required node/edge attributes are missing
+#     ValueError: If graph structure validation fails
+#     Exception: For other unexpected errors
 #     """
-#     if not isinstance(ig_graph, ig.Graph):
-#         raise TypeError("Input must be an igraph.Graph object.")
-#     if ig_graph.vcount() == 0:
-#         return tuple() # Handle empty graph
+#     try: # Start error handling
+#         # --- 1. Classify nodes and count them ---
+#         # Iterate through all vertices in graph B and check their 'category' attribute
+#         # Store the indices of nodes in each category ('system_nodes', 'ancilla_nodes', 'sculpting_nodes')
+#         system_nodes = [v.index for v in B.vs if v['category'] == "system_nodes"]
+#         ancilla_nodes = [v.index for v in B.vs if v['category'] == "ancilla_nodes"]
+#         sculpting_nodes = [v.index for v in B.vs if v['category'] == "sculpting_nodes"]
 
-#     try:
-#         # Get the canonical permutation based on graph structure only
-#         # color/label args are omitted to ignore attributes
-#         perm: List[int] = ig_graph.canonical_permutation()
+#         # Calculate the number of nodes in each category
+#         num_system = len(system_nodes)
+#         num_ancilla = len(ancilla_nodes)
+#         num_sculpting = len(sculpting_nodes)
+#         # Get the total number of nodes in the input bipartite graph B
+#         num_total_bipartite = B.vcount()
+#         # Calculate the number of nodes for the final directed graph D
+#         # Assuming only system and ancilla nodes will become nodes in D
+#         num_total_digraph = num_system + num_ancilla
 
-#         # Apply the permutation to the vertices
-#         permuted_graph: ig.Graph = ig_graph.permute_vertices(perm)
+#         # --- 2. Validation checks ---
+#         # Verify that the sum of classified nodes matches the total number of nodes in B
+#         if num_total_bipartite != num_system + num_ancilla + num_sculpting:
+#             raise ValueError("Sum of node counts does not match the total number of nodes in the bipartite graph.")
 
-#         # Get the adjacency matrix of the permuted graph
-#         # Use bool type to explicitly ignore weights
-#         adj_matrix: List[List[bool]] = permuted_graph.get_adjacency(type=ig.ADJ_BOOL).data
+#         # Check if the number of sculpting nodes equals the total number of nodes in the final graph D
+#         # This is a specific assumption of the EPM model; output a warning if not satisfied
+#         if num_sculpting != num_total_digraph:
+#             print(f"Warning: Sculpting node count ({num_sculpting}) does not match system+ancilla count ({num_total_digraph}). Ensure this is intended.")
+#             # Could raise ValueError here for strict validation if needed
 
-#         # Convert the adjacency matrix (list of lists) to a tuple of tuples for immutability
-#         return tuple(map(tuple, adj_matrix))
-#     except Exception as e:
-#         print(f"Error generating canonical form for graph: {e}")
+#         # --- 3. Calculate and reorder adjacency matrix ---
+#         # Create a list of node indices in a specific order (system -> ancilla -> sculpting)
+#         # This order will be used to reorder the adjacency matrix
+#         ordered_vertices = system_nodes + ancilla_nodes + sculpting_nodes
+
+#         # Calculate the weighted adjacency matrix of input graph B
+#         # B.get_adjacency(attribute="weight") returns the adjacency matrix with weights (as igraph.Matrix)
+#         # .data accesses the actual data, and np.array() converts it to a NumPy array for easier manipulation
+#         # At this point, the rows/columns of adj_matrix_B follow B's original node index order (0 to num_total_bipartite-1)
+#         adj_matrix_B = np.array(B.get_adjacency(attribute="weight").data)
+
+#         # Use NumPy's indexing feature (np.ix_) to reorder the adjacency matrix rows and columns according to ordered_vertices
+#         # reordered_adj_matrix now has rows/columns ordered as system -> ancilla -> sculpting
+#         reordered_adj_matrix = adj_matrix_B[np.ix_(ordered_vertices, ordered_vertices)]
+
+#         # --- 4. Extract edge information for directed graph D ---
+#         # Extract the submatrix from the reordered adjacency matrix needed to determine edges in graph D
+#         # Rows: portion corresponding to system and ancilla nodes (first num_total_digraph rows)
+#         # Columns: portion corresponding to sculpting nodes (from index num_total_digraph to the end)
+#         # adj_matrix_D_sub[i, k] represents the edge weight between the i-th system/ancilla node and k-th sculpting node in the reordered matrix
+#         adj_matrix_D_sub = reordered_adj_matrix[:num_total_digraph, num_total_digraph:]
+
+#         # --- 5. Initialize directed graph D and set node attributes ---
+#         # Initialize the final directed graph D with num_total_digraph nodes and directed=True
+#         D = ig.Graph(n=num_total_digraph, directed=True)
+
+#         # Assign 'category' and 'name' attributes to each node in D (indices 0 to num_total_digraph-1)
+#         # Node names are created in the format 'S_i' (system) and 'A_i' (ancilla) for distinction
+#         categories = ["system_nodes"] * num_system + ["ancilla_nodes"] * num_ancilla
+#         node_names = [f"S_{i}" for i in range(num_system)] + [f"A_{i}" for i in range(num_ancilla)]
+#         D.vs["category"] = categories
+#         D.vs["name"] = node_names
+
+#         # --- 6. Add directed edges ---
+#         # Initialize lists to store edge information (source, target) tuples and weights
+#         edges: List[Tuple[int, int]] = []
+#         weights: List[float] = []
+
+#         # Edge direction in D is from 'j' to 'i'
+#         # Important assumption: the k-th sculpting node corresponds to the j-th node (source) in D (j = k)
+#         # This mapping may need to be changed depending on the EPM model definition being used
+
+#         # Outer loop: iterate through each node i (0 to num_total_digraph-1) in D. This node becomes the edge *target*
+#         for i in range(num_total_digraph):
+#             # Inner loop: iterate through each column k (0 to num_sculpting-1) in adj_matrix_D_sub, corresponding to sculpting nodes
+#             for k in range(num_sculpting):
+#                 # Map sculpting node index k to potential *source* node index j in D (currently direct mapping: j = k)
+#                 j = k
+#                 # Check if the mapped source node j is within the valid range of node indices in D
+#                 # (j could be out of bounds if num_sculpting > num_total_digraph)
+#                 if j < num_total_digraph:
+#                     # Get the weight at position (i, k) in the submatrix
+#                     # This value represents the connection weight between the i-th sys/anc node and k-th sculpting node in the original B graph
+#                     weight = adj_matrix_D_sub[i, k]
+#                     # Only add an edge if the weight is non-zero (i.e., there was a connection in B)
+#                     if weight != 0:
+#                         # Set edge direction from j to i: (source=j, target=i)
+#                         edges.append((j, i))
+#                         # Store the weight for this edge
+#                         weights.append(weight)
+#                 else:
+#                      # If j is out of bounds (can happen when num_sculpting > num_total_digraph and k >= num_total_digraph), 
+#                      # output a warning and skip this potential edge
+#                      print(f"Warning: Sculpting node index {k} maps to digraph index {j}, which is out of bounds ({num_total_digraph}). Skipping potential edge.")
+
+#         # --- 7. Apply edges and weights to D graph ---
+#         # If there's at least one edge to add (edges list is not empty)
+#         if edges:
+#             # Add all collected edges to D graph at once
+#             D.add_edges(edges)
+#             # Assign the collected weights as the 'weight' attribute to the added edges
+#             D.es["weight"] = weights
+
+#         # --- 8. Return result ---
+#         # Return the completed directed graph D
+#         return D
+
+#     # --- Error handling ---
+#     except KeyError as e: # Occurs when 'category' or 'weight' attributes are missing
+#         print(f"Error: Missing required attribute in input graph B: {e}")
+#         raise # Re-raise the error so the caller is aware
+#     except ValueError as e: # Occurs when validation checks fail
+#         print(f"Error: Graph structure validation failed: {e}")
 #         raise
+#     except Exception as e: # For any other unexpected errors
+#         print(f"An unexpected error occurred during digraph conversion: {e}")
+#         raise
+
+# # --- Isomorphism and Grouping ---
+
+# # def canonical_form_without_weights(ig_graph: ig.Graph) -> tuple:
+# #     """
+# #     Generates a canonical representation (adjacency matrix) of the graph structure,
+# #     ignoring edge weights and node/edge attributes other than connectivity.
+
+# #     Uses igraph's canonical permutation.
+
+# #     Parameters:
+# #     -----------
+# #     ig_graph : igraph.Graph
+# #         The input graph.
+
+# #     Returns:
+# #     --------
+# #     tuple
+# #         A tuple representation of the permuted adjacency matrix, suitable for hashing or comparison.
+# #     """
+# #     if not isinstance(ig_graph, ig.Graph):
+# #         raise TypeError("Input must be an igraph.Graph object.")
+# #     if ig_graph.vcount() == 0:
+# #         return tuple() # Handle empty graph
+
+# #     try:
+# #         # Get the canonical permutation based on graph structure only
+# #         # color/label args are omitted to ignore attributes
+# #         perm: List[int] = ig_graph.canonical_permutation()
+
+# #         # Apply the permutation to the vertices
+# #         permuted_graph: ig.Graph = ig_graph.permute_vertices(perm)
+
+# #         # Get the adjacency matrix of the permuted graph
+# #         # Use bool type to explicitly ignore weights
+# #         adj_matrix: List[List[bool]] = permuted_graph.get_adjacency(type=ig.ADJ_BOOL).data
+
+# #         # Convert the adjacency matrix (list of lists) to a tuple of tuples for immutability
+# #         return tuple(map(tuple, adj_matrix))
+# #     except Exception as e:
+# #         print(f"Error generating canonical form for graph: {e}")
+# #         raise
 
 def canonical_form_without_weights(ig_graph: ig.Graph) -> tuple:
     """
