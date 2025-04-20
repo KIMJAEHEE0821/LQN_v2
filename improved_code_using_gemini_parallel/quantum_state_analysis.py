@@ -23,7 +23,7 @@ from sympy.physics.quantum import Ket
 from sympy import Add
 from quantum_utils import *
 import sys
-
+from math import isclose
 # ==============================================================================
 # Section 1: Perfect Matching Analysis Functions
 # ==============================================================================
@@ -1769,5 +1769,479 @@ def check_quantum_states_with_bit_flips(
 #     return dict(final_unique_data_dict)
 
 
+########################################################
 
 
+def get_bipartite_sets(G: ig.Graph) -> Tuple[List[int], List[int]]:
+    """Extracts the two node sets (partitions) of a bipartite graph."""
+    # (이전 버전의 get_bipartite_sets 함수 코드를 여기에 붙여넣으세요)
+    U: List[int] = []
+    V: List[int] = []
+    if 'bipartite' in G.vs.attributes():
+        try:
+            U = [v.index for v in G.vs if v['bipartite'] == 0]
+            V = [v.index for v in G.vs if v['bipartite'] == 1]
+        except KeyError:
+            raise ValueError("Graph has 'bipartite' attribute but some nodes lack the value.")
+    elif 'category' in G.vs.attributes():
+        try:
+            U = [v.index for v in G.vs if v['category'] in ['system_nodes', 'ancilla_nodes']]
+            V = [v.index for v in G.vs if v['category'] == 'sculpting_nodes']
+        except KeyError:
+            raise ValueError("Graph has 'category' attribute but some nodes lack the value.")
+    else:
+        raise ValueError("Cannot determine bipartite sets. Graph lacks 'bipartite' or 'category' node attributes.")
+    if not U or not V:
+         print(f"Warning: One or both bipartite sets are empty (U: {len(U)}, V: {len(V)}).")
+    if len(U) + len(V) != G.vcount():
+         raise ValueError("Sum of nodes in bipartite sets does not match total vertex count.")
+    return U, V
+
+# --- 1. 완전 매칭 구조 찾기 함수 ---
+def _dfs_pm_structures(
+    G: ig.Graph,
+    U: List[int],
+    V: List[int],
+    u_index: int,
+    current_matching_edges: List[Tuple[int, int]], # Store (u, v) tuples
+    matched_V: Dict[int, bool],
+    all_pm_structures: List[List[Tuple[int, int]]]
+) -> None:
+    """Helper DFS to find perfect matching structures (edge lists)."""
+    if u_index == len(U):
+        all_pm_structures.append(current_matching_edges[:])
+        return
+
+    if u_index >= len(U): return # Should not happen with correct base case
+    u = U[u_index]
+
+    # Use neighbors for potentially better performance if graph is sparse
+    # neighbors_of_u = G.neighbors(u) # Or iterate through V as before
+    for v in V: # Or neighbors_of_u if using that optimization
+        # Check if edge exists (redundant if using G.neighbors, needed if iterating V)
+        if G.get_eid(u, v, directed=False, error=False) == -1:
+             continue
+
+        if not matched_V.get(v, False):
+            current_matching_edges.append((u, v))
+            matched_V[v] = True
+            _dfs_pm_structures(G, U, V, u_index + 1, current_matching_edges, matched_V, all_pm_structures)
+            matched_V[v] = False
+            current_matching_edges.pop()
+
+def find_all_perfect_matching_structures(G: ig.Graph, U: List[int], V: List[int]) -> List[List[Tuple[int, int]]]:
+    """Finds all perfect matching structures (lists of edges) in G."""
+    if len(U) != len(V) or not U:
+        return []
+
+    all_pm_structures: List[List[Tuple[int, int]]] = []
+    matched_V: Dict[int, bool] = {v_node: False for v_node in V}
+    _dfs_pm_structures(G, U, V, 0, [], matched_V, all_pm_structures)
+    return all_pm_structures
+
+# --- 2. 고유 간선 식별 (calculate 함수 내부에 통합 가능) ---
+# Helper integrated into calculate function below
+
+# # --- 3. 핵심 계산 함수 ---
+# def calculate_all_signed_states(
+#     G: ig.Graph,
+#     U: List[int],
+#     V: List[int],
+#     list_of_pms: List[List[Tuple[int, int]]]
+# ) -> List[CounterType[str]]:
+#     """
+#     Calculates all 2^K final state vectors based on global sign assignments.
+
+#     Args:
+#         G: The igraph.Graph object.
+#         U: List of nodes in partition U.
+#         V: List of nodes in partition V.
+#         list_of_pms: List of perfect matchings, where each PM is a list of (u, v) edge tuples.
+
+#     Returns:
+#         A list of Counter objects, where each Counter represents a final quantum state
+#         vector corresponding to one global sign assignment. Returns empty list on error.
+#     """
+#     if not list_of_pms:
+#         return []
+
+#     # --- Identify unique edges involved in any PM and assign order ---
+#     unique_edges_set: Set[Tuple[int, int]] = set()
+#     for pm in list_of_pms:
+#         for u, v in pm:
+#             unique_edges_set.add(tuple(sorted((u, v)))) # Store canonically
+#     ordered_unique_edges = list(unique_edges_set)
+#     K = len(ordered_unique_edges)
+#     edge_to_index: Dict[Tuple[int, int], int] = {edge: idx for idx, edge in enumerate(ordered_unique_edges)}
+#     print(f"DEBUG: Found {len(list_of_pms)} PM structures involving {K} unique edges.")
+#     if K > 25: # Add a warning for potentially huge computation
+#          print(f"WARNING: High number of unique edges ({K}). Calculation might be very slow (2^{K} combinations).")
+
+#     # --- Pre-fetch original weights ---
+#     original_weights: Dict[Tuple[int, int], float] = {}
+#     valid_weights = True
+#     for u_edge, v_edge in ordered_unique_edges:
+#         w = get_edge_weight(G, u_edge, v_edge)
+#         if w is None:
+#             print(f"ERROR: Weight not found for edge ({u_edge},{v_edge}) in E_PM. Cannot proceed.")
+#             valid_weights = False
+#             break
+#         original_weights[(u_edge, v_edge)] = w # Use canonical edge tuple as key
+#     if not valid_weights: return []
+
+#     # --- Prepare for state string sorting ---
+#     u_indices_map = {node_idx: i for i, node_idx in enumerate(U)}
+
+#     all_final_states: List[CounterType[str]] = []
+
+#     # --- Iterate through 2^K global sign assignments ---
+#     for global_sign_tuple in itertools.product([1, -1], repeat=K):
+#         current_state_vector = defaultdict(int)
+
+#         # --- Iterate through all M perfect matchings ---
+#         for pm_edges in list_of_pms: # pm_edges is List[Tuple[int, int]]
+#             pm_overall_sign = 1
+#             base_state_string_parts = [] # List of (sort_key, state_char)
+
+#             # --- Calculate sign and base state string for this PM ---
+#             for u, v in pm_edges:
+#                 edge_tuple_sorted = tuple(sorted((u, v)))
+#                 original_weight = original_weights[edge_tuple_sorted]
+
+#                 # Global sign for this edge in this iteration
+#                 edge_idx = edge_to_index[edge_tuple_sorted]
+#                 sigma = global_sign_tuple[edge_idx]
+
+#                 # Effective weight and edge sign contribution
+#                 effective_weight = sigma * original_weight
+#                 # Use isclose for float comparison safety
+#                 edge_sign = -1 if isclose(effective_weight, -1.0) else 1
+#                 pm_overall_sign *= edge_sign
+
+#                 # State char based ONLY on original weight
+#                 state_char = None
+#                 if isclose(original_weight, 1.0): state_char = '0'
+#                 elif isclose(original_weight, 2.0): state_char = '1'
+#                 # Ignore 3.0 etc.
+
+#                 if state_char is not None:
+#                     u_node_in_edge = u if u in u_indices_map else v
+#                     sort_key = u_indices_map.get(u_node_in_edge, float('inf'))
+#                     base_state_string_parts.append((sort_key, state_char))
+
+#             # Generate base state string (same for all global sign assignments for this pm structure)
+#             base_state_string_parts.sort()
+#             base_state_string = ''.join([char for _, char in base_state_string_parts])
+
+#             # Add contribution to the state vector for THIS global sign assignment
+#             current_state_vector[base_state_string] += pm_overall_sign
+
+#         # --- Post-process current_state_vector ---
+#         final_coeffs_for_this_state = {s: c for s, c in current_state_vector.items() if c != 0}
+
+#         # Optional: GCD normalization
+#         if final_coeffs_for_this_state:
+#              coeffs_abs = [abs(c) for c in final_coeffs_for_this_state.values()]
+#              if len(coeffs_abs) >= 2:
+#                  try:
+#                      common_divisor = reduce(gcd, coeffs_abs)
+#                      if common_divisor > 1:
+#                          final_coeffs_for_this_state = {s: c // common_divisor for s, c in final_coeffs_for_this_state.items()}
+#                  except Exception as e_gcd:
+#                      print(f"Warning: GCD normalization failed for one state: {e_gcd}")
+
+#         state_counter = Counter(final_coeffs_for_this_state)
+#         all_final_states.append(state_counter) # Store the final state vector
+
+#     return all_final_states
+
+# --- calculate_all_signed_states function (Modified for sign tracking) ---
+def calculate_all_signed_states(
+    G: ig.Graph,
+    U: List[int],
+    V: List[int],
+    list_of_pms: List[List[Tuple[int, int]]]
+) -> Tuple[List[Tuple[int, int]], List[Tuple[Tuple[int, ...], CounterType[str]]]]: # Return type changed
+    """
+    Calculates all 2^K final state vectors based on global sign assignments.
+    Now returns the edge order along with (sign_tuple, state_vector) pairs.
+
+    Args:
+        G: The igraph.Graph object. Assumed to have original weights (1.0, 2.0, 3.0).
+        U: List of nodes in partition U.
+        V: List of nodes in partition V.
+        list_of_pms: List of perfect matchings, where each PM is a list of (u, v) edge tuples.
+
+    Returns:
+        Tuple containing:
+        - ordered_unique_edges: List of unique edges (u,v) defining the sign tuple order.
+        - results_list: List of tuples, each being (global_sign_tuple, state_counter).
+        Returns ([], []) on error or if no PMs.
+    """
+    if not list_of_pms:
+        return [], [] # Return empty lists if no PMs
+
+    # --- Identify unique edges involved in any PM and assign order ---
+    unique_edges_set: Set[Tuple[int, int]] = set()
+    for pm in list_of_pms:
+        for u, v in pm:
+            unique_edges_set.add(tuple(sorted((u, v)))) # Store canonically
+    ordered_unique_edges = list(unique_edges_set) # Assign fixed order
+    K = len(ordered_unique_edges)
+    edge_to_index: Dict[Tuple[int, int], int] = {edge: idx for idx, edge in enumerate(ordered_unique_edges)}
+    print(f"DEBUG: Found {len(list_of_pms)} PM structures involving {K} unique edges.")
+    if K > 25: # Add a warning for potentially huge computation
+         print(f"WARNING: High number of unique edges ({K}). Calculation might be very slow (2^{K} combinations).")
+
+    # --- Pre-fetch original weights for unique edges ---
+    original_weights: Dict[Tuple[int, int], float] = {}
+    valid_weights = True
+    for u_edge, v_edge in ordered_unique_edges:
+        # Fetch original weight using the helper function
+        w = get_edge_weight(G, u_edge, v_edge)
+        if w is None:
+            print(f"ERROR: Weight not found for edge ({u_edge},{v_edge}) in E_PM. Cannot proceed.")
+            valid_weights = False
+            break
+        original_weights[(u_edge, v_edge)] = w # Use canonical edge tuple as key
+    if not valid_weights: return [], [] # Return empty lists if weights are missing
+
+    # --- Prepare for state string sorting ---
+    u_indices_map = {node_idx: i for i, node_idx in enumerate(U)}
+
+    # Changed result storage structure: List of (sign_tuple, state_counter)
+    results_list: List[Tuple[Tuple[int, ...], CounterType[str]]] = []
+
+    # --- Iterate through 2^K global sign assignments ---
+    for global_sign_tuple in itertools.product([1, -1], repeat=K): # e.g., (1, -1, 1, ...)
+        # Initialize the state vector for this specific global sign combination
+        current_state_vector = defaultdict(int)
+
+        # --- Iterate through all M perfect matchings ---
+        for pm_edges in list_of_pms: # pm_edges is List[Tuple[int, int]]
+            pm_overall_sign = 1 # Product starts at 1 for this PM's sign calculation
+            base_state_string_parts = [] # Parts to build the state string for this PM structure
+
+            # --- Calculate sign contribution and build state string parts for this PM ---
+            for u, v in pm_edges:
+                edge_tuple_sorted = tuple(sorted((u, v)))
+                # Original weight determines state string character
+                original_weight = original_weights[edge_tuple_sorted]
+
+                # Get the globally assigned sign for this edge for this iteration
+                edge_idx = edge_to_index[edge_tuple_sorted]
+                sigma = global_sign_tuple[edge_idx]
+
+                # Calculate effective weight and determine edge's sign contribution
+                effective_weight = sigma * original_weight
+                # Use isclose for float comparison safety!
+                #edge_sign = -1 if isclose(effective_weight, -1.0) else 1
+                edge_sign = -1 if effective_weight < 0 else 1 # 
+                pm_overall_sign *= edge_sign
+
+                # Determine state character based ONLY on original weight
+                state_char = None
+                if isclose(original_weight, 1.0): state_char = '0'
+                elif isclose(original_weight, 2.0): state_char = '1'
+                # Ignore original_weight == 3.0 or others for state string
+
+                if state_char is not None:
+                    # Determine sort key based on the node belonging to partition U
+                    u_node_in_edge = u if u in u_indices_map else v
+                    sort_key = u_indices_map.get(u_node_in_edge, float('inf'))
+                    base_state_string_parts.append((sort_key, state_char))
+
+            # Generate the base state string (this is the same for all 2^K combos for this pm_edges structure)
+            base_state_string_parts.sort()
+            base_state_string = ''.join([char for _, char in base_state_string_parts])
+
+            # Add the calculated sign contribution for this PM to the state vector
+            # corresponding to this specific global sign assignment
+            current_state_vector[base_state_string] += pm_overall_sign
+
+        # --- Post-process the aggregated state vector for this global sign assignment ---
+        final_coeffs_for_this_state = {s: c for s, c in current_state_vector.items() if c != 0}
+
+        # Optional: GCD normalization for the current state vector
+        if final_coeffs_for_this_state:
+            coeffs_abs = [abs(c) for c in final_coeffs_for_this_state.values()]
+            if len(coeffs_abs) >= 2:
+                try:
+                    common_divisor = reduce(gcd, coeffs_abs)
+                    if common_divisor > 1:
+                        # Integer division preserves sign
+                        final_coeffs_for_this_state = {s: c // common_divisor for s, c in final_coeffs_for_this_state.items()}
+                except Exception as e_gcd:
+                    print(f"Warning: GCD normalization failed for one state vector: {e_gcd}")
+
+        state_counter = Counter(final_coeffs_for_this_state)
+
+        # Add global_sign_tuple when storing the result for this iteration
+        results_list.append((global_sign_tuple, state_counter))
+
+    # Optional: Deduplication logic (if needed, add here to filter results_list)
+    # ... Check if multiple sign_tuples resulted in the exact same state_counter ...
+    # For now, return all results:
+    # Return value changed
+    return ordered_unique_edges, results_list
+
+# --- 4. 메인 제어 함수 (find_pm_of_bigraph 수정 예시) ---
+def find_pm_results_final(graph_list: List[ig.Graph]) -> List[List[Any]]:
+    """
+    Processes graphs to find all quantum states based on global edge sign combinations.
+    Returns a list where each item corresponds to an input graph and contains
+    a LIST of final state Counters (one for each global sign combination).
+    """
+    processed_results = []
+    for i, G in enumerate(graph_list):
+        print(f"\nProcessing graph index {i}...")
+        try:
+            U, V = get_bipartite_sets(G)
+            if not U or not V or len(U) != len(V):
+                 print(f"Skipping graph {i}: Invalid partitions (U:{len(U)}, V:{len(V)})")
+                 continue
+
+            # 1. Find PM Structures
+            pm_structures = find_all_perfect_matching_structures(G, U, V)
+            if not pm_structures:
+                 print(f"Skipping graph {i}: No perfect matchings found.")
+                 continue
+
+            # Optional: Apply filters based on pm_structures count or unused edges
+            # Example Filter 1: >= 2 PM structures
+            if len(pm_structures) < 2:
+                print(f"Skipping graph {i}: Less than 2 PM structures found ({len(pm_structures)}).")
+                continue
+            # Example Filter 2: Check for unused edges (needs find_unused_edges adaptation)
+            # unique_pm_edges = set(tuple(sorted(e)) for pm in pm_structures for e in pm)
+            # all_graph_edges = set(tuple(sorted((e.source, e.target))) for e in G.es)
+            # if not unique_pm_edges.issuperset(all_graph_edges): # Or specific check
+            #     print(f"Skipping graph {i}: Not all graph edges are used in PMs.")
+            #     continue
+
+            # 2. Calculate all 2^K states
+            list_of_state_counters = calculate_all_signed_states(G, U, V, pm_structures)
+
+            # 3. Store results (Graph + List of States)
+            if list_of_state_counters: # Only store if calculation succeeded and potentially produced states
+                 processed_results.append([
+                     list_of_state_counters, # List of Counters
+                     pm_structures,          # List of PM edge lists
+                     G,
+                     i
+                 ])
+            else:
+                 print(f"Graph {i}: Calculation resulted in no final states (or failed).")
+
+        except Exception as e:
+            print(f"Error processing graph index {i}: {e}")
+            # import traceback
+            # traceback.print_exc()
+
+    print(f"\nProcessing finished. Generated results for {len(processed_results)} graphs.")
+    return processed_results
+
+
+# 
+
+# --- perform_final_signed_analysis function (Modified for new return type) ---
+def perform_final_signed_analysis(
+    filtered_results: List[Tuple[str, Any, int, Any, CounterType[str], List[int], Dict[str, int]]]
+) -> List[Dict[str, Any]]:
+    """
+    Performs the final analysis (Interpretation 6: 2^K global sign combinations)
+    on the filtered results from check_quantum_states_with_bit_flips, storing
+    the applied signs information with each state vector list.
+
+    Parameters:
+    -----------
+    filtered_results : List[Tuple[...]]
+        The list returned by check_quantum_states_with_bit_flips.
+        Each tuple is expected to contain at least (hash_key, graph_object, graph_index, ...).
+
+    Returns:
+    --------
+    List[Dict[str, Any]]
+        A list where each dictionary corresponds to a successfully processed entry
+        from filtered_results. Each dictionary contains:
+        {
+            'hash_key': str,
+            'graph_index': int,
+            'graph': ig.Graph, # Optional: store graph obj if needed later
+            'pm_structures': List[List[Tuple[int, int]]], # Optional: store structures
+            'ordered_unique_edges': List[Tuple[int, int]], # List of unique edges defining sign tuple order
+            'signed_states_results': List[Tuple[Tuple[int, ...], CounterType[str]]] # List of (sign_tuple, state_counter) pairs
+        }
+    """
+    final_signed_analysis_results = [] # List to store the final results
+
+    # --- Input data validation (Optional) ---
+    if not isinstance(filtered_results, list):
+        print("Error: Expected 'filtered_results' to be a list.")
+        return [] # Return empty list
+    if not filtered_results:
+        print("Info: 'filtered_results' is empty. No graphs to process in Stage 3.")
+        return [] # Return empty list
+
+    print(f"\nStarting Stage 3: Performing 2^K analysis on {len(filtered_results)} filtered graph entries...")
+
+    # --- Iterate through filtered results ---
+    for entry_index, filter_entry in enumerate(filtered_results):
+        # --- Input item structure check and data extraction ---
+        try:
+            # Check return tuple structure from check_quantum_states_with_bit_flips
+            if not isinstance(filter_entry, tuple) or len(filter_entry) < 3: # Check minimum key, graph, index
+                 print(f"  Skipping entry {entry_index}: Invalid format or insufficient elements.")
+                 continue
+
+            hash_key = filter_entry[0]
+            graph_obj = filter_entry[1]
+            graph_idx = filter_entry[2]
+            # pm_data = filter_entry[3] # Not used directly, PM structures recalculated
+
+            # Validate graph_obj
+            if not isinstance(graph_obj, ig.Graph):
+                 print(f"  Skipping entry {entry_index} (Key='{hash_key}', Idx={graph_idx}): Invalid graph object type {type(graph_obj)}.")
+                 continue
+
+            print(f"  Processing filtered entry {entry_index}: Key='{hash_key}', Index={graph_idx}")
+
+            # a. Get partitions
+            U, V = get_bipartite_sets(graph_obj)
+            if not U or not V or len(U) != len(V):
+                 print(f"    Skipping: Invalid partitions found (U:{len(U)}, V:{len(V)})")
+                 continue
+
+            # b. Find perfect matching structures (recalculate for safety)
+            pm_structures = find_all_perfect_matching_structures(graph_obj, U, V)
+            if not pm_structures:
+                 print(f"    Skipping: No perfect matching structures found for this graph.")
+                 continue
+            print(f"    Found {len(pm_structures)} PM structures.")
+
+            # c. Calculate 2^K state vectors and the associated sign info (core logic)
+            # Call calculate_all_signed_states and get both return values
+            ordered_edges, signed_states_results = calculate_all_signed_states(graph_obj, U, V, pm_structures)
+
+            # d. Store final result including sign info
+            if signed_states_results is not None: # Check if calculation succeeded (might return [] on error)
+                final_signed_analysis_results.append({
+                    'hash_key': hash_key,
+                    'graph_index': graph_idx,
+                    'graph': graph_obj, # Decide whether to store graph object based on need
+                    'pm_structures': pm_structures, # Decide whether to store PM structures based on need
+                    'ordered_unique_edges': ordered_edges, # List of unique edges defining sign tuple order
+                    'signed_states_results': signed_states_results # Core result: List of (sign_tuple, state_counter) pairs
+                })
+                print(f"    Successfully generated {len(signed_states_results)} (sign_tuple, state_vector) pairs.")
+            else: # Handle case where calculation returns empty list (e.g., weight error)
+                print(f"    Warning: State calculation failed or resulted in no states (returned empty list).")
+
+        except Exception as e:
+            print(f"    ERROR processing entry {entry_index} (Key='{hash_key}', Idx={graph_idx}): {e}")
+            # traceback.print_exc() # Uncomment for detailed debugging
+
+    print(f"\nStage 3 finished. Final analysis results generated for {len(final_signed_analysis_results)} entries.")
+    return final_signed_analysis_results
+
+########################################################
