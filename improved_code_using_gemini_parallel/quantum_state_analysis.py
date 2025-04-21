@@ -2038,37 +2038,151 @@ def find_pm_results_final(graph_list: List[ig.Graph]) -> List[List[Any]]:
 
 # 
 
-# --- perform_final_signed_analysis function (Modified for new return value) ---
+# # --- perform_final_signed_analysis function (Modified for new return value) ---
+# def perform_final_signed_analysis(
+#     filtered_results: List[Tuple[str, Any, int, Any, CounterType[str], List[int], Dict[str, int]]]
+# ) -> List[Dict[str, Any]]:
+#     """
+#     Performs the final analysis (Interpretation 6), now including the mapping
+#     from PM structures to their base state strings in the results.
+#     """
+#     final_signed_analysis_results = [] # List to store the final results
+#     # --- Input data validation (Optional) ---
+#     if not isinstance(filtered_results, list):
+#         print("Error: Expected 'filtered_results' to be a list.")
+#         return [] # Return empty list
+#     if not filtered_results:
+#         print("Info: 'filtered_results' is empty. No graphs to process.")
+#         return [] # Return empty list
+
+#     print(f"\nStarting Stage 3: Performing 2^K analysis on {len(filtered_results)} filtered graph entries...")
+#     # --- Iterate through filtered results ---
+#     for entry_index, filter_entry in enumerate(filtered_results):
+#         try:
+#             # --- Input item structure check and data extraction ---
+#             # Check return tuple structure from check_quantum_states_with_bit_flips
+#             if not isinstance(filter_entry, tuple) or len(filter_entry) < 3: # Check minimum key, graph, index
+#                  print(f"  Skipping entry {entry_index}: Invalid format or insufficient elements.")
+#                  continue
+
+#             hash_key = filter_entry[0]
+#             graph_obj = filter_entry[1]
+#             graph_idx = filter_entry[2]
+#             # pm_data = filter_entry[3] # Not used directly, PM structures recalculated
+
+#             # Validate graph_obj
+#             if not isinstance(graph_obj, ig.Graph):
+#                  print(f"  Skipping entry {entry_index} (Key='{hash_key}', Idx={graph_idx}): Invalid graph object type {type(graph_obj)}.")
+#                  continue
+
+#             print(f"  Processing filtered entry {entry_index}: Key='{hash_key}', Index={graph_idx}")
+
+#             # a. Get partitions
+#             U, V = get_bipartite_sets(graph_obj)
+#             # Check partition validity
+#             if not U or not V or len(U) != len(V):
+#                  print(f"    Skipping: Invalid partitions found (U:{len(U)}, V:{len(V)})")
+#                  continue
+
+#             # b. Find perfect matching structures
+#             pm_structures = find_all_perfect_matching_structures(graph_obj, U, V)
+#             # Check if PM structures were found
+#             if not pm_structures:
+#                  print(f"    Skipping: No perfect matching structures found for this graph.")
+#                  continue
+#             print(f"    Found {len(pm_structures)} PM structures.")
+
+#             # c. Calculate state vectors and PM-state mapping
+#             # ===> Modified to receive 3 return values <===
+#             ordered_edges, signed_states_results, pm_to_base_state = \
+#                 calculate_all_signed_states(graph_obj, U, V, pm_structures)
+
+#             # d. Store final result (including the new mapping)
+#             if signed_states_results is not None: # Check calculation result (might be [] on error)
+#                 final_signed_analysis_results.append({
+#                     'hash_key': hash_key,
+#                     'graph_index': graph_idx,
+#                     'graph': graph_obj, # Decide whether to store graph object based on need
+#                     # 'pm_structures': pm_structures, # Optional: Now pm_to_base_state might be more useful
+#                     'ordered_unique_edges': ordered_edges, # List of unique edges defining sign tuple order
+#                     'signed_states_results': signed_states_results, # List of (sign tuple, state counter)
+#                     # ===> Add new mapping information <===
+#                     'pm_to_base_state': pm_to_base_state # List of (pm_structure_edges, base_state_string)
+#                 })
+#                 print(f"    Successfully generated {len(signed_states_results)} (sign_tuple, state_vector) pairs.")
+#             else:
+#                 print(f"    Warning: State calculation failed or resulted in no states.")
+
+#         except Exception as e:
+#             print(f"    ERROR processing entry {entry_index} (Key='{hash_key}', Idx={graph_idx}): {e}")
+#             # traceback.print_exc() # Uncomment for detailed debugging
+
+#     print(f"\nStage 3 finished. Final analysis results generated for {len(final_signed_analysis_results)} entries.")
+#     return final_signed_analysis_results
+
+# --- Modified perform_final_signed_analysis function ---
 def perform_final_signed_analysis(
+    # Input type should match the return type of check_quantum_states_with_bit_flips
     filtered_results: List[Tuple[str, Any, int, Any, CounterType[str], List[int], Dict[str, int]]]
 ) -> List[Dict[str, Any]]:
     """
-    Performs the final analysis (Interpretation 6), now including the mapping
-    from PM structures to their base state strings in the results.
+    Performs the final analysis (Interpretation 6: 2^K global sign combinations)
+    on the filtered results from check_quantum_states_with_bit_flips,
+    carrying forward the bit flip information and including PM-to-base-state mapping.
+
+    Parameters:
+    -----------
+    filtered_results : List[Tuple[...]]
+        The list returned by check_quantum_states_with_bit_flips.
+        Each tuple is expected to contain at least
+        (hash_key, graph_object, graph_index, ..., applied_flips_list, ...).
+        Indices used: 0 (key), 1 (graph), 2 (index), 5 (flips).
+
+    Returns:
+    --------
+    List[Dict[str, Any]]
+        A list where each dictionary corresponds to a successfully processed entry
+        from filtered_results. Each dictionary contains:
+        {
+            'hash_key': str,
+            'graph_index': int,
+            'graph': ig.Graph, # The graph object itself (optional based on need)
+            'ordered_unique_edges': List[Tuple[int, int]], # Edges defining sign tuple order
+            'signed_states_results': List[Tuple[Tuple[int, ...], CounterType[str]]], # List of (sign_tuple, state_vector)
+            'pm_to_base_state': List[Tuple[List[Tuple[int, int]], str]], # Mapping from PM structure to base state string
+            'applied_bit_flips': List[int] # Bit flips from Stage 2 filtering
+        }
     """
     final_signed_analysis_results = [] # List to store the final results
+
     # --- Input data validation (Optional) ---
     if not isinstance(filtered_results, list):
         print("Error: Expected 'filtered_results' to be a list.")
         return [] # Return empty list
     if not filtered_results:
-        print("Info: 'filtered_results' is empty. No graphs to process.")
+        print("Info: 'filtered_results' is empty. No graphs to process in Stage 3.")
         return [] # Return empty list
 
     print(f"\nStarting Stage 3: Performing 2^K analysis on {len(filtered_results)} filtered graph entries...")
+
     # --- Iterate through filtered results ---
     for entry_index, filter_entry in enumerate(filtered_results):
+        # --- Input item structure check and data extraction ---
         try:
-            # --- Input item structure check and data extraction ---
             # Check return tuple structure from check_quantum_states_with_bit_flips
-            if not isinstance(filter_entry, tuple) or len(filter_entry) < 3: # Check minimum key, graph, index
-                 print(f"  Skipping entry {entry_index}: Invalid format or insufficient elements.")
+            # Need at least indices 0, 1, 2, 5
+            if not isinstance(filter_entry, tuple) or len(filter_entry) < 6:
+                 print(f"  Skipping entry {entry_index}: Invalid format or insufficient elements (expected at least 6).")
                  continue
 
             hash_key = filter_entry[0]
             graph_obj = filter_entry[1]
             graph_idx = filter_entry[2]
-            # pm_data = filter_entry[3] # Not used directly, PM structures recalculated
+            applied_flips_list = filter_entry[5] # Extract bit flip info (Index 5)
+
+            # Validate applied_flips_list type (Optional)
+            if not isinstance(applied_flips_list, list):
+                 print(f"  Warning: Entry {entry_index} (Key='{hash_key}', Idx={graph_idx}): 'applied_flips_list' is not a list ({type(applied_flips_list)}). Storing as is.")
 
             # Validate graph_obj
             if not isinstance(graph_obj, ig.Graph):
@@ -2084,7 +2198,7 @@ def perform_final_signed_analysis(
                  print(f"    Skipping: Invalid partitions found (U:{len(U)}, V:{len(V)})")
                  continue
 
-            # b. Find perfect matching structures
+            # b. Find perfect matching structures (recalculate)
             pm_structures = find_all_perfect_matching_structures(graph_obj, U, V)
             # Check if PM structures were found
             if not pm_structures:
@@ -2093,21 +2207,20 @@ def perform_final_signed_analysis(
             print(f"    Found {len(pm_structures)} PM structures.")
 
             # c. Calculate state vectors and PM-state mapping
-            # ===> Modified to receive 3 return values <===
+            # Call calculate_all_signed_states and get all three return values
             ordered_edges, signed_states_results, pm_to_base_state = \
                 calculate_all_signed_states(graph_obj, U, V, pm_structures)
 
-            # d. Store final result (including the new mapping)
-            if signed_states_results is not None: # Check calculation result (might be [] on error)
+            # d. Store final result (without redundant 'pm_structures')
+            if signed_states_results is not None: # Check calculation result
                 final_signed_analysis_results.append({
                     'hash_key': hash_key,
                     'graph_index': graph_idx,
-                    'graph': graph_obj, # Decide whether to store graph object based on need
-                    # 'pm_structures': pm_structures, # Optional: Now pm_to_base_state might be more useful
-                    'ordered_unique_edges': ordered_edges, # List of unique edges defining sign tuple order
-                    'signed_states_results': signed_states_results, # List of (sign tuple, state counter)
-                    # ===> Add new mapping information <===
-                    'pm_to_base_state': pm_to_base_state # List of (pm_structure_edges, base_state_string)
+                    'graph': graph_obj,                       # Store graph object if needed downstream
+                    'ordered_unique_edges': ordered_edges,    # Edges defining sign tuple order
+                    'signed_states_results': signed_states_results, # List of (sign_tuple, state_counter)
+                    'pm_to_base_state': pm_to_base_state,     # Mapping from PM structure to base state string
+                    'applied_bit_flips': applied_flips_list   # Bit flips from Stage 2
                 })
                 print(f"    Successfully generated {len(signed_states_results)} (sign_tuple, state_vector) pairs.")
             else:
