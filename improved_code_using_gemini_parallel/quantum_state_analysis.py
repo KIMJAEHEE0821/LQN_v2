@@ -853,34 +853,36 @@ except ImportError:
     print("Warning: igraph library not found. Graph object type validation might be affected.", file=sys.stderr)
 
 
+
 def check_quantum_states_with_bit_flips(
     result_dict: Dict[str, List[List[Any]]],
-    target_states: Union[str, List[str]],
+    # ===> Unified parameter <===
+    targets: Union[str, List[str], Dict[str, int]],
+    # === Remaining parameters ===
     bit_flip_positions: Optional[List[int]] = None,
     hash_key: Optional[str] = None,
     exact_num_states: Optional[int] = None
-) -> List[Tuple[str, Any, int, Any, CounterType[str], List[int], Dict[str, int]]]: # MODIFIED return type
+) -> List[Tuple[str, Any, int, Any, CounterType[str], List[int], Dict[str, int]]]:
     """
     Checks if quantum states exist in Counters within result_dict,
-    considering possible bit flips at specified positions. Finds only the *first*
-    successful bit flip combination for each Counter entry.
-    Optionally filters based on the exact number of states in the Counter.
-    Includes enhanced checks for data structure and logs unexpected errors.
+    considering possible bit flips. If targets is a dictionary, it also checks
+    for matching coefficients. Finds only the *first* successful bit flip
+    combination for each Counter entry. Optionally filters based on the
+    exact number of states in the Counter.
 
     Parameters:
     -----------
     result_dict : dict
         Result dictionary. Assumed structure:
-        {'hash': [[Counter_obj, perfect_matching_data, graph_obj, graph_idx], ...], ...}
-        **NOTE:** Assumes Counter at index 0, perfect_matching_data at index 1,
-                 graph object at index 2, graph index (int) at index 3.
-                 Adjust index constants if the structure differs.
-    target_states : Union[str, List[str]]
-        Quantum state(s) to search for (e.g., '010' or ['010', '111']).
+        {'hash': [[Counter, pm_data, graph_obj, graph_idx], ...], ...}
+    targets : Union[str, List[str], Dict[str, int]]
+        - If str: The single target quantum state string to search for.
+        - If List[str]: A list of target state strings. Checks if *all* exist.
+        - If Dict[str, int]: A dictionary mapping state strings to required integer
+          coefficients. Checks if all states exist *and* have the specified coefficients.
     bit_flip_positions : Optional[List[int]], default=None
-        List of 0-based positions where bit flips are allowed.
-        If None, all combinations of flips across the longest target state's
-        length are tried (can be computationally expensive).
+        List of 0-based positions where bit flips are allowed in target states.
+        If None, all positions up to the longest target state length are considered.
     hash_key : Optional[str], default=None
         Specific hash key to search within result_dict. If None, searches all keys.
     exact_num_states : Optional[int], default=None
@@ -888,172 +890,165 @@ def check_quantum_states_with_bit_flips(
 
     Returns:
     --------
-    List[Tuple[str, Any, int, Any, CounterType[str], List[int], Dict[str, int]]] # MODIFIED return type description
+    List[Tuple[str, Any, int, Any, CounterType[str], List[int], Dict[str, int]]]
         List of tuples for successful matches (max one per input Counter entry):
-        (hash_key, graph_object, graph_index, perfect_matching_data, # ADDED perfect_matching_data
-         original_counter, applied_flips_list,
-         found_flipped_states_with_coeffs_dict)
-        The type of graph_object depends on whether 'igraph' is installed and used.
-        The type of perfect_matching_data depends on how it's stored in result_dict.
+        (hash_key, graph_object, graph_index, perfect_matching_data,
+         original_counter, applied_flips_list, # List of positions flipped
+         found_flipped_states_with_coeffs_dict) # Dict showing found states and their actual coeffs
 
     Raises:
     -------
     TypeError
-        If `target_states` is not a string or list of strings, or if elements
-        within the list are not strings.
+        If `targets` has an invalid type or format.
     """
     results = []
-
-    # --- Input Processing: target_states ---
     local_target_states: List[str] = []
-    if isinstance(target_states, str):
-        if target_states: local_target_states = [target_states]
-    elif isinstance(target_states, list):
-        if all(isinstance(s, str) for s in target_states):
-            local_target_states = [s for s in target_states if s] # Keep non-empty strings
+    valid_target_coeffs: Optional[Dict[str, int]] = None # Stores coefficient check requirements
+
+    # --- Input Type Processing ---
+    if isinstance(targets, str):
+        if targets: # Non-empty string
+            local_target_states = [targets]
+        # valid_target_coeffs remains None
+    elif isinstance(targets, list):
+        if all(isinstance(s, str) for s in targets):
+            local_target_states = [s for s in targets if s] # Only non-empty strings
         else:
-            raise TypeError("If target_states is a list, all elements must be strings.")
+            raise TypeError("If targets is a list, all elements must be non-empty strings.")
+        # valid_target_coeffs remains None
+    elif isinstance(targets, dict):
+        valid_target_coeffs = {}
+        temp_target_states = []
+        all_valid = True
+        for state, coeff in targets.items():
+            if not isinstance(state, str) or not state:
+                print(f"Warning: Invalid state key '{state}' in targets dictionary. Skipping.", file=sys.stderr)
+                all_valid = False; break
+            if not isinstance(coeff, int):
+                print(f"Warning: Coefficient for state '{state}' ({coeff}) must be an integer. Skipping.", file=sys.stderr)
+                all_valid = False; break
+            temp_target_states.append(state)
+            valid_target_coeffs[state] = coeff # Add only if valid
+
+        if all_valid and temp_target_states:
+            local_target_states = temp_target_states # Set state list if valid
+        else:
+            print("Warning: Invalid format in targets dictionary. No states will be searched.", file=sys.stderr)
+            return [] # Return empty list if invalid
     else:
-        raise TypeError("target_states must be a string or a list of strings.")
+        raise TypeError("targets must be a string, a list of strings, or a dictionary[str, int].")
 
     if not local_target_states:
-         print("Warning: No valid non-empty target states provided to search for.", file=sys.stderr)
+         print("Warning: No valid non-empty target states derived to search for.", file=sys.stderr)
          return []
 
     # --- Input Processing: search_keys ---
     search_keys: List[str] = []
     if hash_key is not None:
-        if hash_key in result_dict:
-            search_keys = [hash_key]
-        else:
-            print(f"Warning: Specified hash_key '{hash_key}' not found in result_dict.", file=sys.stderr)
-            return []
-    else:
-        search_keys = list(result_dict.keys())
-    if not search_keys:
-        print("Warning: No keys to search in result_dict.", file=sys.stderr)
-        return []
+        if hash_key in result_dict: search_keys = [hash_key]
+        else: print(f"Warning: Specified hash_key '{hash_key}' not found.", file=sys.stderr); return []
+    else: search_keys = list(result_dict.keys())
+    if not search_keys: print("Warning: No keys to search in result_dict.", file=sys.stderr); return []
 
     # --- Input Processing: bit_flip_positions ---
     actual_bit_flip_positions: List[int] = []
+    max_len_target = 0
+    if local_target_states: # Ensure list is not empty before finding max length
+         try:
+             max_len_target = max(len(s) for s in local_target_states)
+         except ValueError: # Handles empty strings if they somehow passed validation
+             max_len_target = 0
+
     if bit_flip_positions is None:
-        try:
-            max_length = max(len(state) for state in local_target_states) if local_target_states else 0
-            if max_length > 0:
-                 actual_bit_flip_positions = list(range(max_length))
-        except ValueError:
-             print("Warning: Could not determine max length for default bit flips.", file=sys.stderr)
-             actual_bit_flip_positions = []
+        if max_len_target > 0:
+            actual_bit_flip_positions = list(range(max_len_target))
     elif isinstance(bit_flip_positions, list):
          valid_positions = [p for p in bit_flip_positions if isinstance(p, int) and p >= 0]
-         if len(valid_positions) != len(bit_flip_positions):
-             print("Warning: Some invalid values (non-integer or negative) removed from bit_flip_positions.", file=sys.stderr)
-         actual_bit_flip_positions = sorted(list(set(valid_positions))) # Unique, sorted, non-negative ints
+         if len(valid_positions) != len(bit_flip_positions): print("Warning: Invalid values removed from bit_flip_positions.", file=sys.stderr)
+         actual_bit_flip_positions = sorted(list(set(valid_positions)))
+         # Optional check: ensure positions are within bounds of target state lengths
+         if actual_bit_flip_positions and max_len_target > 0 and actual_bit_flip_positions[-1] >= max_len_target:
+              print(f"Warning: Some bit_flip_positions might be out of bounds for the shortest target state.", file=sys.stderr)
     else:
          print("Warning: Invalid type for bit_flip_positions. No bit flips will be considered.", file=sys.stderr)
-         actual_bit_flip_positions = [] # Ensure it's a list
 
     # --- Generate Bit Flip Combinations ---
     all_combinations = list(chain.from_iterable(
         combinations(actual_bit_flip_positions, r) for r in range(len(actual_bit_flip_positions) + 1)
     ))
-    if not all_combinations:
-        all_combinations = [()] # Represents the "no flip" case
+    if not all_combinations: all_combinations = [()] # Include the no-flip case
 
-    # --- Define Indices (Constants for clarity) ---
-    # Assumed structure for inner list: [Counter, PerfectMatching, GraphObj, GraphIdx, ...]
-    COUNTER_IDX = 0
-    PERFECT_MATCHING_IDX = 1 # <<< Index for Perfect Matching Data
-    GRAPH_OBJ_IDX = 2
-    GRAPH_IDX_IDX = 3
-    # Ensure minimum length covers all accessed indices
-    MIN_DATA_LEN = max(COUNTER_IDX, PERFECT_MATCHING_IDX, GRAPH_OBJ_IDX, GRAPH_IDX_IDX) + 1
+    # --- Define Indices ---
+    COUNTER_IDX, PERFECT_MATCHING_IDX, GRAPH_OBJ_IDX, GRAPH_IDX_IDX = 0, 1, 2, 3
+    MIN_DATA_LEN = 4 # Ensure required indices exist
 
     # --- Main Processing Loop ---
     for key in search_keys:
-        if key not in result_dict or not isinstance(result_dict[key], list):
-            print(f"Warning: Skipping key '{key}'. Missing or invalid data format (expected list).", file=sys.stderr)
-            continue
+        if key not in result_dict or not isinstance(result_dict[key], list): continue
 
         for i, state_data in enumerate(result_dict[key]):
-            # --- Structure and Type Validation for each item ---
-            if not isinstance(state_data, (list, tuple)) or len(state_data) < MIN_DATA_LEN:
-                print(f"Warning: Skipping item {i} for key '{key}'. Invalid structure or length < {MIN_DATA_LEN}.", file=sys.stderr)
-                continue
-
-            # Validate Counter
+            # --- Structure and Type Validation ---
+            if not isinstance(state_data, (list, tuple)) or len(state_data) < MIN_DATA_LEN: continue
             counter = state_data[COUNTER_IDX]
-            if not isinstance(counter, Counter):
-                print(f"Warning: Skipping item {i} for key '{key}'. Expected Counter at index {COUNTER_IDX}, found {type(counter).__name__}.", file=sys.stderr)
-                continue
-
-            # --- Get Perfect Matching Data ---
-            # Assuming it's at index PERFECT_MATCHING_IDX.
-            # Add specific type validation here if needed/known.
-            perfect_matching_data = state_data[PERFECT_MATCHING_IDX] # <<< EXTRACTED DATA
-
-            # Validate Graph Object (conditionally if igraph installed)
+            if not isinstance(counter, Counter): continue
+            perfect_matching_data = state_data[PERFECT_MATCHING_IDX]
             graph_obj = state_data[GRAPH_OBJ_IDX]
-            if IGRAPH_INSTALLED and not isinstance(graph_obj, ig.Graph):
-                 # Allow for graph_obj being None or some other placeholder if igraph isn't used everywhere
-                 if graph_obj is not None: # Only warn if it's not None and not an ig.Graph
-                     print(f"Warning: For key '{key}', item {i}: Expected igraph.Graph or None at index {GRAPH_OBJ_IDX}, found {type(graph_obj).__name__}.", file=sys.stderr)
-                 # Depending on requirements, you might want to 'continue' here if graph_obj is mandatory
-
-            # Validate Graph Index
             graph_idx = state_data[GRAPH_IDX_IDX]
-            if not isinstance(graph_idx, int):
-                 print(f"Warning: Skipping item {i} for key '{key}'. Expected int at index {GRAPH_IDX_IDX}, found {type(graph_idx).__name__}.", file=sys.stderr)
-                 continue
+            if not isinstance(graph_idx, int): continue
+            # (igraph validation if needed)
 
             # --- Exact State Count Filter ---
-            if exact_num_states is not None and len(counter) != exact_num_states:
-                continue # Skip if the number of states doesn't match exactly
+            if exact_num_states is not None and len(counter) != exact_num_states: continue
 
             # --- Iterate through Bit Flip Combinations ---
-            # This inner loop will now stop for the current state_data
-            # as soon as the first valid flip combination is found.
+            found_match_for_this_entry = False
             for bit_positions_tuple in all_combinations:
-                bit_positions = list(bit_positions_tuple) # Use list version
+                if found_match_for_this_entry: break
+
+                bit_positions = list(bit_positions_tuple)
 
                 try:
-                    # Apply flips to all target states for this combination
+                    # Apply flips and create mapping
                     flipped_targets = [apply_bit_flip(state, bit_positions) for state in local_target_states]
+                    # Map original state to its flipped version for coefficient lookup
+                    orig_to_flipped = {orig: flipped for orig, flipped in zip(local_target_states, flipped_targets)}
 
-                    # Check if ALL flipped target states exist in the current counter
+                    # Condition 1: All flipped states must exist
                     all_states_exist = all(flipped_state in counter for flipped_state in flipped_targets)
 
                     if all_states_exist:
-                        # Retrieve coefficients for the found states
-                        state_coefficients = {state: counter[state] for state in flipped_targets}
+                        # Condition 2: Check coefficients if required
+                        coeffs_match = True # Default to True if no check needed
+                        if valid_target_coeffs is not None: # Check required
+                            coeffs_match = False # Assume False until proven True
+                            all_required_coeffs_match_so_far = True
+                            for orig_state, required_coeff in valid_target_coeffs.items():
+                                # Find the corresponding flipped state
+                                # Should exist because all_states_exist is True and validation passed
+                                flipped_state = orig_to_flipped[orig_state]
+                                # Compare actual coefficient with required coefficient
+                                if counter.get(flipped_state, 0) != required_coeff:
+                                    all_required_coeffs_match_so_far = False
+                                    break # Mismatch found, no need to check others
+                            if all_required_coeffs_match_so_far:
+                                coeffs_match = True # All specified coefficients matched
 
-                        # --- Construct result tuple with perfect matching data ---
-                        result_tuple = (
-                            key,
-                            graph_obj,
-                            graph_idx,
-                            perfect_matching_data, # <<< ADDED perfect_matching_data here
-                            counter,
-                            bit_positions, # List of positions flipped for this match
-                            state_coefficients
-                        )
-                        results.append(result_tuple)
+                        # If both conditions met (state existence and, if required, coeff match)
+                        if coeffs_match:
+                            # Success! Record the result
+                            found_flipped_states_with_coeffs = {ft: counter[ft] for ft in flipped_targets}
 
-                        # --- BREAK ADDED ---
-                        # Stop searching for other flip combinations for THIS state_data item
-                        # once the first successful one is found.
-                        break
-                        # --- END OF ADDED BREAK ---
+                            result_tuple = (
+                                key, graph_obj, graph_idx, perfect_matching_data,
+                                counter, bit_positions, found_flipped_states_with_coeffs
+                            )
+                            results.append(result_tuple)
+                            found_match_for_this_entry = True # Set flag
+                            break # Stop checking other flips for this Counter entry
 
                 except Exception as e:
-                    # Catch unexpected errors during flip application or check
-                    print(f"Warning: Unexpected error during processing for key '{key}', item {i}, flips {bit_positions}: {e}. Skipping this combination.", file=sys.stderr)
-                    # Continue to the next flip combination even if one fails
-                    continue
-
-            # End of loop for bit_positions_tuple for the current state_data
-        # End of loop for state_data in result_dict[key]
-    # End of loop for key in search_keys
+                    print(f"Warning: Unexpected error during processing for key '{key}', item {i}, flips {bit_positions}: {e}. Skipping combo.", file=sys.stderr)
+                    continue # Try next flip combination
 
     return results
 
@@ -2242,63 +2237,80 @@ def has_odd_negative_coeffs(state_counter: CounterType[str]) -> bool:
     return negative_count % 2 != 0
 
 def filter_results_by_odd_negatives(
-    final_analysis_output: List[Dict[str, Any]] # Result list from perform_final_signed_analysis
+    final_analysis_output: List[Dict[str, Any]],
+    # ===> Added new optional parameter <===
+    required_num_states: Optional[int] = None
 ) -> List[Dict[str, Any]]:
     """
-    Filters the final analysis results based on the odd negative coefficient condition.
+    Filters the final analysis results based on specified conditions
+    applied to the state vectors (Counters).
 
-    Keeps graph entries only if they contain at least one state vector with an
-    odd number of negative coefficients. For kept entries, the state vector list
-    ('signed_states_results') is also filtered to include only those satisfying
-    the condition.
+    Conditions checked:
+    1. State vector must have an odd number of negative coefficients.
+    2. (Optional) State vector must have exactly `required_num_states` entries
+       if `required_num_states` is not None.
+
+    Keeps graph entries only if they contain at least one state vector
+    satisfying ALL specified conditions. For kept entries, the state vector
+    list ('signed_states_results') is also filtered accordingly.
 
     Args:
-        final_analysis_output: The list of result dictionaries produced by
-                               perform_final_signed_analysis (or equivalent).
-                               Each dict contains 'signed_states_results'.
+        final_analysis_output: The list of result dictionaries.
+        required_num_states: If not None, only state vectors with exactly
+                             this number of non-zero entries (keys) are kept,
+                             in addition to the odd negative coefficient check.
 
     Returns:
-        A new list containing only the filtered result dictionaries, where the
-        'signed_states_results' list within each dictionary is also filtered.
+        A new list containing only the filtered result dictionaries.
     """
-    filtered_output = [] # List to store the final filtered results
+    filtered_output = []
     if not final_analysis_output:
         return []
 
-    print(f"\nStarting filtering based on odd negative coefficients on {len(final_analysis_output)} graph entries...")
+    # Create filter condition description string
+    filter_desc = ["odd number of negative coefficients"]
+    if required_num_states is not None:
+        # Validate required_num_states (optional)
+        if not isinstance(required_num_states, int) or required_num_states < 0:
+             print(f"Warning: Invalid required_num_states ({required_num_states}). Must be a non-negative integer. Disabling this filter.", file=sys.stderr)
+             required_num_states = None # Disable filter if invalid
+        else:
+             filter_desc.append(f"exactly {required_num_states} states")
 
-    # Iterate through each item (graph result dictionary) in the input final_analysis_output list
+    print(f"\nStarting filtering based on: [{', '.join(filter_desc)}] on {len(final_analysis_output)} graph entries...")
+
     for graph_result_dict in final_analysis_output:
-        # Check validity of result dictionary structure (existence of required keys)
         if 'signed_states_results' not in graph_result_dict or \
            not isinstance(graph_result_dict['signed_states_results'], list):
+            # Print warning message (same as before)
             print(f"Warning: Skipping entry for key {graph_result_dict.get('hash_key', 'N/A')}, index {graph_result_dict.get('graph_index', 'N/A')} due to missing/invalid 'signed_states_results'.")
             continue
 
-        # List to store state vectors that satisfy the condition (odd number of negative coefficients)
         qualifying_signed_states = []
-        # Iterate through the signed_states_results list for this graph
         for sign_tuple, state_counter in graph_result_dict['signed_states_results']:
-            # Use helper function to check the condition
-            if has_odd_negative_coeffs(state_counter):
-                # If condition is met, add to qualifying_signed_states list
+
+            # ===> Condition 1: Check for odd number of negative coefficients <===
+            passes_odd_check = has_odd_negative_coeffs(state_counter)
+
+            # ===> Condition 2: Check state count (if required_num_states is specified) <===
+            # len(state_counter) returns the number of keys with non-zero coefficients
+            passes_num_check = (required_num_states is None) or \
+                               (len(state_counter) == required_num_states)
+
+            # ===> Check if both conditions are satisfied <===
+            if passes_odd_check and passes_num_check:
                 qualifying_signed_states.append((sign_tuple, state_counter))
 
-        # --- Graph-level filtering ---
-        # If qualifying_signed_states list is not empty (i.e., at least one state vector meets the condition)
+        # If there's at least one state vector in this graph that satisfies all conditions
         if qualifying_signed_states:
-            # --- Apply state vector level filtering ---
-            # Copy the existing graph result dictionary and replace 'signed_states_results' with the filtered list
             new_graph_result = graph_result_dict.copy()
-            new_graph_result['signed_states_results'] = qualifying_signed_states # Overwrite with filtered list
-            # Add to final result list
+            # Replace 'signed_states_results' with the filtered list
+            new_graph_result['signed_states_results'] = qualifying_signed_states
             filtered_output.append(new_graph_result)
-            print(f"  Keeping entry Key='{graph_result_dict.get('hash_key', 'N/A')}', Index={graph_result_dict.get('graph_index', 'N/A')}: Found {len(qualifying_signed_states)} states with odd negative coeffs.")
-        #else: # Graphs with no state vectors meeting the condition are not included in the final result
-        #    print(f"  Discarding entry Key='{graph_result_dict.get('hash_key', 'N/A')}', Index={graph_result_dict.get('graph_index', 'N/A')}: No states met the condition.")
-
+            print(f"  Keeping entry Key='{graph_result_dict.get('hash_key', 'N/A')}', Index={graph_result_dict.get('graph_index', 'N/A')}: Found {len(qualifying_signed_states)} states meeting all criteria.")
+        # else: # If no state vectors satisfy all conditions, discard this graph result
 
     print(f"Filtering complete. Kept {len(filtered_output)} graph entries.")
-    return filtered_output # Return the final filtered result list
+    return filtered_output
 
 ########################################################
